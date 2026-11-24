@@ -1,29 +1,46 @@
 (() => {
   'use strict';
 
-  // STRICT RTDB ENDPOINT & ROOT FOLDER (METADATA & AUTH ONLY — 0 KB FILE TRAFFIC)
-  const RTDB_BASE = 'https://cloud-db-studio-default-rtdb.firebaseio.com/onlymeted';
-  // 18 MB raw binary shard stays safely below Telegram's 20 MB getFile download limit
-  const TG_SHARD_BYTES = 18 * 1024 * 1024;
-  const PARALLEL_DOWNLOADS = 3;
-  const SESSION_KEY = 'onlymeted_session_v2';
+  // PRIVATE CLOUD ENDPOINTS (FIXED & HIDDEN FROM USER INTERFACE)
+  const INDEX_BASE = 'https://cloud-db-studio-default-rtdb.firebaseio.com/onlymeted';
+  const STORAGE_RELAY = 'https://only-me-ted.koirala57111.workers.dev';
+  const STORAGE_CHANNEL = '-1003795582178';
+  const STORAGE_KEY = '9082703821:AAEO2qIPOO7Y-iUN9-Lr41HjNG8I9zlM6nE';
+
+  const SHARD_BYTES = 18 * 1024 * 1024;
+  const PARALLEL_STREAMS = 3;
+  const SESSION_KEY = 'onlymeted_session_v3';
+
+  const ACCENT_THEMES = {
+    indigo: { a1: '#6c8cff', a2: '#38e2c6' },
+    emerald: { a1: '#10b981', a2: '#38bdf8' },
+    violet: { a1: '#a855f7', a2: '#ec4899' },
+    rose: { a1: '#fb7185', a2: '#f59e0b' },
+    amber: { a1: '#f59e0b', a2: '#38e2c6' }
+  };
 
   document.addEventListener('contextmenu', (e) => e.preventDefault());
 
   let currentUser = null;
   let authMode = 'login';
   let itemsMap = {};
-  let tgConfig = { workerUrl: '', botToken: '', chatId: '' };
   let activeFilter = 'all';
+  let activeFolder = 'all';
   let searchQuery = '';
   let activeItem = null;
   let activeObjectUrl = null;
   let activePlainText = '';
+  let activeDecryptedPass = '';
+  let selectedCardAccent = 'default';
+  let selectedTheme = 'indigo';
+  let pendingAvatarData = undefined;
   let deleteConfirmArmed = false;
+  let purgeConfirmArmed = false;
+  let deleteAccountArmed = false;
 
   const $ = (id) => document.getElementById(id);
 
-  function showToast(msg, ms = 2700) {
+  function showToast(msg, ms = 2600) {
     const stack = $('toastStack');
     const el = document.createElement('div');
     el.className = 'toast-pill';
@@ -49,9 +66,9 @@
 
   function formatBytes(bytes) {
     if (!bytes || bytes <= 0) return '0 B';
-    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
     const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
-    return `${(bytes / Math.pow(1024, i)).toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+    return `${(bytes / Math.pow(1024, i)).toFixed(i === 0 ? 0 : 2)} ${units[i]}`;
   }
 
   function timeAgo(ts) {
@@ -74,45 +91,53 @@
     return new Promise((r) => setTimeout(r, ms));
   }
 
-  // RTDB REST HELPERS
-  async function rtdbGet(path) {
-    const res = await fetch(`${RTDB_BASE}/${path}.json`);
-    if (!res.ok) throw new Error(`RTDB GET failed (${res.status})`);
+  function escapeHtml(str) {
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  // CLOUD INDEX TRANSPORT
+  async function indexGet(path) {
+    const res = await fetch(`${INDEX_BASE}/${path}.json`);
+    if (!res.ok) throw new Error('Connection unavailable');
     return res.json();
   }
 
-  async function rtdbPut(path, data) {
-    const res = await fetch(`${RTDB_BASE}/${path}.json`, {
+  async function indexPut(path, data) {
+    const res = await fetch(`${INDEX_BASE}/${path}.json`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data)
     });
-    if (!res.ok) throw new Error(`RTDB PUT failed (${res.status})`);
+    if (!res.ok) throw new Error('Sync failed');
     return res.json();
   }
 
-  async function rtdbPatch(path, data) {
-    const res = await fetch(`${RTDB_BASE}/${path}.json`, {
+  async function indexPatch(path, data) {
+    const res = await fetch(`${INDEX_BASE}/${path}.json`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data)
     });
-    if (!res.ok) throw new Error(`RTDB PATCH failed (${res.status})`);
+    if (!res.ok) throw new Error('Update failed');
     return res.json();
   }
 
-  async function rtdbDelete(path) {
-    const res = await fetch(`${RTDB_BASE}/${path}.json`, { method: 'DELETE' });
-    if (!res.ok) throw new Error(`RTDB DELETE failed (${res.status})`);
+  async function indexDelete(path) {
+    const res = await fetch(`${INDEX_BASE}/${path}.json`, { method: 'DELETE' });
+    if (!res.ok) throw new Error('Delete failed');
   }
 
-  // INDEXEDDB EDGE CACHE FOR ZERO-LATENCY REPEAT ACCESS
+  // LOCAL EDGE CACHE FOR INSTANT ACCESS
   const edgeCache = {
     dbPromise: null,
     open() {
       if (this.dbPromise) return this.dbPromise;
       this.dbPromise = new Promise((resolve, reject) => {
-        const req = indexedDB.open('OnlyMeTedTgCache', 1);
+        const req = indexedDB.open('OnlyMeTedVaultCache', 1);
         req.onupgradeneeded = () => req.result.createObjectStore('blobs');
         req.onsuccess = () => resolve(req.result);
         req.onerror = () => reject(req.error);
@@ -156,7 +181,7 @@
     }
   };
 
-  // CRYPTO HELPERS
+  // CRYPTOGRAPHY (AUTH HASHING & AES-256 NOTE ENCRYPTION)
   async function sha256Hex(str) {
     const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
     return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, '0')).join('');
@@ -229,7 +254,7 @@
     return new TextDecoder().decode(plainBuf);
   }
 
-  // STREAM GZIP COMPRESSION
+  // STREAM COMPRESSION
   async function compressBuffer(arrayBuffer) {
     if (typeof CompressionStream === 'undefined') {
       return { buffer: arrayBuffer, compressed: false };
@@ -258,29 +283,12 @@
     return new Response(ds.readable).arrayBuffer();
   }
 
-  // TELEGRAM ENGINE HELPERS
-  function getWorkerBase() {
-    return (tgConfig.workerUrl || '').trim().replace(/\/+$/, '');
-  }
-
-  function getTgHeaders() {
-    const headers = {};
-    if (tgConfig.botToken) headers['X-TG-Token'] = tgConfig.botToken.trim();
-    if (tgConfig.chatId) headers['X-TG-Chat'] = tgConfig.chatId.trim();
-    return headers;
-  }
-
-  function updateEngineStatusUI() {
-    const configured = Boolean(getWorkerBase());
-    $('setupBanner').classList.toggle('hidden', configured);
-    const pill = $('syncDot');
-    if (configured) {
-      pill.classList.remove('warn');
-      $('syncText').textContent = 'TG Live';
-    } else {
-      pill.classList.add('warn');
-      $('syncText').textContent = 'Setup TG';
-    }
+  // SILENT INFINITE CLOUD BLOB RELAY
+  function relayHeaders() {
+    return {
+      'X-TG-Token': STORAGE_KEY,
+      'X-TG-Chat': STORAGE_CHANNEL
+    };
   }
 
   function setTransferProgress(visible, title = '', pct = 0) {
@@ -295,18 +303,15 @@
     $('transferFill').style.width = `${Math.min(100, Math.max(0, pct))}%`;
   }
 
-  async function uploadSingleShardToTelegram(blobSlice, shardName, caption) {
-    const workerUrl = getWorkerBase();
-    if (!workerUrl) throw new Error('Configure Telegram Engine in Settings (⚙) first');
-
+  async function uploadSingleShard(blobSlice, shardName, caption) {
     while (true) {
       const form = new FormData();
       form.append('document', blobSlice, shardName);
       form.append('caption', caption);
 
-      const res = await fetch(`${workerUrl}/upload`, {
+      const res = await fetch(`${STORAGE_RELAY}/upload`, {
         method: 'POST',
-        headers: getTgHeaders(),
+        headers: relayHeaders(),
         body: form
       });
       const data = await res.json();
@@ -317,7 +322,7 @@
       }
 
       if (!res.ok || !data.ok) {
-        throw new Error(data.error || `Telegram upload failed (${res.status})`);
+        throw new Error('Cloud storage transfer interrupted');
       }
 
       return {
@@ -328,77 +333,66 @@
     }
   }
 
-  async function uploadBufferToTelegram(itemId, rawBuffer, label) {
+  async function uploadBufferToCloud(itemId, rawBuffer, label) {
     setTransferProgress(true, `Preparing ${label}...`, 6);
     const { buffer, compressed } = await compressBuffer(rawBuffer);
     const totalBytes = buffer.byteLength;
-    const totalShards = Math.max(1, Math.ceil(totalBytes / TG_SHARD_BYTES));
-    const tgShards = [];
+    const totalShards = Math.max(1, Math.ceil(totalBytes / SHARD_BYTES));
+    const shards = [];
 
     for (let idx = 0; idx < totalShards; idx++) {
-      const start = idx * TG_SHARD_BYTES;
-      const end = Math.min(totalBytes, start + TG_SHARD_BYTES);
+      const start = idx * SHARD_BYTES;
+      const end = Math.min(totalBytes, start + SHARD_BYTES);
       const slice = new Blob([buffer.slice(start, end)], { type: 'application/octet-stream' });
-      const shardName = `${itemId}_part${idx + 1}of${totalShards}.omt`;
-      const caption = `OnlyMeTed | ${currentUser.handle} | ${label} [${idx + 1}/${totalShards}]`;
+      const shardName = `${itemId}_p${idx + 1}.dat`;
+      const caption = `${currentUser.key}:${itemId}:${idx + 1}/${totalShards}`;
 
       setTransferProgress(
         true,
-        `Streaming to Telegram (${idx + 1}/${totalShards})...`,
+        `Uploading ${label} (${idx + 1}/${totalShards})...`,
         10 + (idx / totalShards) * 85
       );
 
-      const shardRef = await uploadSingleShardToTelegram(slice, shardName, caption);
-      tgShards.push(shardRef);
+      const shardRef = await uploadSingleShard(slice, shardName, caption);
+      shards.push(shardRef);
 
-      // Gentle pacing to avoid Telegram per-chat 429 rate limits on multi-part uploads
-      if (idx < totalShards - 1) await sleep(650);
+      if (idx < totalShards - 1) await sleep(600);
     }
 
     return {
       compressed,
       storedBytes: totalBytes,
-      tgShards
+      shards
     };
   }
 
-  async function downloadBufferFromTelegram(meta) {
+  async function downloadBufferFromCloud(meta) {
     const cacheKey = `${currentUser.key}:${meta.id}`;
     const cached = await edgeCache.get(cacheKey);
     if (cached) return cached;
 
-    const workerUrl = getWorkerBase();
-    if (!workerUrl) throw new Error('Configure Telegram Engine in Settings (⚙) first');
-
-    const shards = meta.tgShards || [];
-    if (!shards.length) throw new Error('No Telegram shards linked to this entry');
+    const shards = meta.shards || meta.tgShards || [];
+    if (!shards.length) throw new Error('File payload unavailable');
 
     let completed = 0;
     const buffers = new Array(shards.length);
-    setTransferProgress(true, `Fetching ${meta.title} from Telegram...`, 8);
+    setTransferProgress(true, `Loading ${meta.title}...`, 8);
 
     let cursor = 0;
-    const workers = Array.from({ length: Math.min(PARALLEL_DOWNLOADS, shards.length) }, async () => {
+    const workers = Array.from({ length: Math.min(PARALLEL_STREAMS, shards.length) }, async () => {
       while (cursor < shards.length) {
         const idx = cursor++;
         const shard = shards[idx];
         const res = await fetch(
-          `${workerUrl}/download?file_id=${encodeURIComponent(shard.fileId)}`,
-          { headers: getTgHeaders() }
+          `${STORAGE_RELAY}/download?file_id=${encodeURIComponent(shard.fileId)}`,
+          { headers: relayHeaders() }
         );
-        if (!res.ok) {
-          let errMsg = `Shard ${idx + 1} download failed (${res.status})`;
-          try {
-            const j = await res.json();
-            if (j.error) errMsg = j.error;
-          } catch {}
-          throw new Error(errMsg);
-        }
+        if (!res.ok) throw new Error('Unable to retrieve file stream');
         buffers[idx] = await res.arrayBuffer();
         completed++;
         setTransferProgress(
           true,
-          `Downloading (${completed}/${shards.length})...`,
+          `Retrieving (${completed}/${shards.length})...`,
           10 + (completed / shards.length) * 85
         );
       }
@@ -413,13 +407,49 @@
     return rawBuf;
   }
 
+  async function eraseRemoteShards(shards) {
+    const messageIds = (shards || []).map((s) => s.messageId).filter(Boolean);
+    if (!messageIds.length) return;
+    fetch(`${STORAGE_RELAY}/delete`, {
+      method: 'POST',
+      headers: { ...relayHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messageIds })
+    }).catch(() => {});
+  }
+
+  // THEME & PROFILE UI
+  function applyTheme(themeKey) {
+    const palette = ACCENT_THEMES[themeKey] || ACCENT_THEMES.indigo;
+    selectedTheme = themeKey in ACCENT_THEMES ? themeKey : 'indigo';
+    document.documentElement.style.setProperty('--accent', palette.a1);
+    document.documentElement.style.setProperty('--accent-2', palette.a2);
+  }
+
+  function renderUserProfileHeader() {
+    if (!currentUser) return;
+    const label = currentUser.displayName || currentUser.handle || 'Only Me Ted';
+    const initial = label.trim().charAt(0).toUpperCase() || 'T';
+    $('headerGreeting').textContent = label;
+    $('headerAvatarInitial').textContent = initial;
+
+    if (currentUser.avatarData) {
+      $('headerAvatarImg').src = currentUser.avatarData;
+      $('headerAvatarImg').classList.remove('hidden');
+      $('headerAvatarInitial').classList.add('hidden');
+    } else {
+      $('headerAvatarImg').classList.add('hidden');
+      $('headerAvatarInitial').classList.remove('hidden');
+    }
+    applyTheme(currentUser.theme || 'indigo');
+  }
+
   // AUTHENTICATION FLOW
   function setAuthMode(mode) {
     authMode = mode;
     $('tabLogin').classList.toggle('active', mode === 'login');
     $('tabSignup').classList.toggle('active', mode === 'signup');
     $('confirmWrap').classList.toggle('hidden', mode === 'login');
-    $('authSubmitLabel').textContent = mode === 'login' ? 'Unlock Vault' : 'Initialize Unlimited Vault';
+    $('authSubmitLabel').textContent = mode === 'login' ? 'Sign In' : 'Create Unlimited Account';
   }
 
   async function handleAuthSubmit() {
@@ -429,56 +459,76 @@
     const confirm = $('authConfirm').value;
 
     if (key.length < 3) {
-      showToast('Handle must be at least 3 letters/numbers');
+      showToast('Username must be at least 3 letters or numbers');
       return;
     }
     if (pass.length < 4) {
-      showToast('Master Key must be at least 4 characters');
+      showToast('Password must be at least 4 characters');
       return;
     }
 
     $('authSubmitLabel').textContent = 'Connecting...';
     try {
-      const existing = await rtdbGet(`users/${key}`);
+      const existing = await indexGet(`users/${key}`);
       if (authMode === 'signup') {
         if (existing) {
-          showToast('Vault handle already claimed');
+          showToast('Username already taken');
           setAuthMode('login');
           return;
         }
         if (pass !== confirm) {
-          showToast('Master keys do not match');
+          showToast('Passwords do not match');
           setAuthMode('signup');
           return;
         }
         const salt = randomHex(16);
         const hash = await sha256Hex(`${salt}:${pass}`);
-        await rtdbPut(`users/${key}`, {
+        const profile = {
           handle,
+          displayName: handle,
+          bio: 'Personal unlimited cloud vault',
+          theme: 'indigo',
+          avatarData: '',
           salt,
           hash,
           createdAt: Date.now()
-        });
-        showToast('Vault created on Cloud Studio DB');
+        };
+        await indexPut(`users/${key}`, profile);
+        currentUser = {
+          key,
+          handle,
+          displayName: profile.displayName,
+          bio: profile.bio,
+          theme: profile.theme,
+          avatarData: ''
+        };
+        showToast('Account created');
       } else {
         if (!existing) {
-          showToast('Vault not found — create one first');
+          showToast('Account not found — create one first');
           setAuthMode('signup');
           return;
         }
         const hash = await sha256Hex(`${existing.salt}:${pass}`);
         if (hash !== existing.hash) {
-          showToast('Invalid Master Key');
+          showToast('Incorrect password');
           setAuthMode('login');
           return;
         }
+        currentUser = {
+          key,
+          handle: existing.handle || handle,
+          displayName: existing.displayName || existing.handle || handle,
+          bio: existing.bio || '',
+          theme: existing.theme || 'indigo',
+          avatarData: existing.avatarData || ''
+        };
       }
 
-      currentUser = { key, handle: existing?.handle || handle };
-      localStorage.setItem(SESSION_KEY, JSON.stringify(currentUser));
+      localStorage.setItem(SESSION_KEY, JSON.stringify({ key: currentUser.key, handle: currentUser.handle }));
       enterWorkspace();
     } catch (err) {
-      showToast(`Sync error: ${err.message}`);
+      showToast(err.message || 'Unable to sign in');
       setAuthMode(authMode);
     }
   }
@@ -486,19 +536,20 @@
   function enterWorkspace() {
     $('authView').classList.add('hidden');
     $('appView').classList.remove('hidden');
+    renderUserProfileHeader();
     syncVault(true);
   }
 
   function signOut() {
     currentUser = null;
     itemsMap = {};
-    tgConfig = { workerUrl: '', botToken: '', chatId: '' };
     localStorage.removeItem(SESSION_KEY);
+    applyTheme('indigo');
     $('appView').classList.add('hidden');
     $('authView').classList.remove('hidden');
     $('authPassword').value = '';
     setAuthMode('login');
-    showToast('Vault locked');
+    showToast('Signed out');
   }
 
   // VAULT SYNC & RENDER
@@ -506,24 +557,24 @@
     if (!currentUser) return;
     $('syncText').textContent = 'Syncing';
     try {
-      const [metaData, cfgData] = await Promise.all([
-        rtdbGet(`vault/${currentUser.key}/meta`),
-        rtdbGet(`vault/${currentUser.key}/tgConfig`)
+      const [metaData, profileData] = await Promise.all([
+        indexGet(`vault/${currentUser.key}/meta`),
+        indexGet(`users/${currentUser.key}`)
       ]);
       itemsMap = metaData || {};
-      if (cfgData) {
-        tgConfig = {
-          workerUrl: cfgData.workerUrl || '',
-          botToken: cfgData.botToken || '',
-          chatId: cfgData.chatId || ''
-        };
+      if (profileData) {
+        currentUser.displayName = profileData.displayName || currentUser.handle;
+        currentUser.bio = profileData.bio || '';
+        currentUser.theme = profileData.theme || 'indigo';
+        currentUser.avatarData = profileData.avatarData || '';
+        renderUserProfileHeader();
       }
-      updateEngineStatusUI();
+      $('syncText').textContent = 'Synced';
       renderVault();
-      if (!silent) showToast('Index synced');
-    } catch (err) {
+      if (!silent) showToast('Vault up to date');
+    } catch {
       $('syncText').textContent = 'Offline';
-      showToast(`Sync issue: ${err.message}`);
+      showToast('Could not refresh right now');
     }
   }
 
@@ -540,7 +591,46 @@
     return '📁';
   }
 
+  function renderFolderChips(allItems) {
+    const folders = Array.from(
+      new Set(allItems.map((it) => (it.folder || 'General').trim()).filter(Boolean))
+    ).sort();
+
+    const bar = $('folderBar');
+    if (folders.length <= 1 && folders[0] === 'General') {
+      bar.classList.add('hidden');
+      activeFolder = 'all';
+      return;
+    }
+
+    bar.classList.remove('hidden');
+    bar.innerHTML = '';
+
+    const allChip = document.createElement('div');
+    allChip.className = `filter-chip folder-chip ${activeFolder === 'all' ? 'active' : ''}`;
+    allChip.textContent = 'All Folders';
+    bindDivButton(allChip, () => {
+      activeFolder = 'all';
+      renderVault();
+    });
+    bar.appendChild(allChip);
+
+    folders.forEach((folder) => {
+      const chip = document.createElement('div');
+      chip.className = `filter-chip folder-chip ${activeFolder === folder ? 'active' : ''}`;
+      chip.textContent = `📂 ${folder}`;
+      bindDivButton(chip, () => {
+        activeFolder = folder;
+        renderVault();
+      });
+      bar.appendChild(chip);
+    });
+  }
+
   function matchesFilter(item) {
+    const itemFolder = (item.folder || 'General').trim();
+    if (activeFolder !== 'all' && itemFolder !== activeFolder) return false;
+
     if (activeFilter === 'pinned' && !item.pinned) return false;
     if (activeFilter === 'locked' && !item.encrypted) return false;
     if (activeFilter === 'note' && item.kind !== 'note') return false;
@@ -553,27 +643,20 @@
 
     if (searchQuery) {
       const q = searchQuery.toLowerCase();
-      const hay = `${item.title || ''} ${item.snippet || ''} ${(item.tags || []).join(' ')} ${item.mime || ''}`.toLowerCase();
+      const hay = `${item.title || ''} ${item.snippet || ''} ${itemFolder} ${(item.tags || []).join(' ')} ${item.mime || ''}`.toLowerCase();
       if (!hay.includes(q)) return false;
     }
     return true;
   }
 
-  function escapeHtml(str) {
-    return String(str)
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;');
-  }
-
   function renderVault() {
     const allItems = Object.values(itemsMap);
-    const totalTgBytes = allItems.reduce((acc, it) => acc + (it.size || 0), 0);
-    const approxMetaBytes = JSON.stringify(itemsMap).length;
+    const totalStoredBytes = allItems.reduce((acc, it) => acc + (it.size || 0), 0);
 
     $('vaultStats').textContent =
-      `${allItems.length} item${allItems.length === 1 ? '' : 's'} • ${formatBytes(totalTgBytes)} on Telegram • ${formatBytes(approxMetaBytes)} RTDB index`;
+      `${allItems.length} item${allItems.length === 1 ? '' : 's'} • ${formatBytes(totalStoredBytes)} stored • ∞ Unlimited`;
+
+    renderFolderChips(allItems);
 
     const filtered = allItems
       .filter(matchesFilter)
@@ -586,10 +669,13 @@
     filtered.forEach((item) => {
       const card = document.createElement('div');
       card.className = 'vault-item';
+      if (item.accent && item.accent !== 'default') {
+        card.dataset.accent = item.accent;
+      }
       card.setAttribute('role', 'button');
       card.setAttribute('tabindex', '0');
 
-      const shardCount = (item.tgShards || []).length;
+      const folderLabel = (item.folder || '').trim();
       const tagsHtml = (item.tags || [])
         .slice(0, 2)
         .map((t) => `<span class="mini-tag">#${escapeHtml(t)}</span>`)
@@ -601,8 +687,8 @@
             <div class="item-badge">${getCategoryIcon(item)}</div>
             <div class="item-badges-right">
               ${item.pinned ? '<span class="mini-tag pin">★</span>' : ''}
-              ${item.encrypted ? '<span class="mini-tag lock">AES</span>' : ''}
-              ${shardCount > 0 ? `<span class="mini-tag tg">TG×${shardCount}</span>` : ''}
+              ${item.encrypted ? '<span class="mini-tag lock">LOCKED</span>' : ''}
+              ${folderLabel && folderLabel !== 'General' ? `<span class="mini-tag folder">${escapeHtml(folderLabel)}</span>` : ''}
               ${tagsHtml}
             </div>
           </div>
@@ -620,108 +706,56 @@
     });
   }
 
-  // TELEGRAM SETTINGS MODAL
-  function openSettingsModal() {
-    $('cfgWorkerUrl').value = tgConfig.workerUrl || '';
-    $('cfgBotToken').value = tgConfig.botToken || '';
-    $('cfgChatId').value = tgConfig.chatId || '';
-    $('settingsModal').classList.remove('hidden');
-  }
-
-  async function saveEngineConfig() {
-    const nextCfg = {
-      workerUrl: $('cfgWorkerUrl').value.trim().replace(/\/+$/, ''),
-      botToken: $('cfgBotToken').value.trim(),
-      chatId: $('cfgChatId').value.trim()
-    };
-    if (!nextCfg.workerUrl) {
-      showToast('Enter your Cloudflare Worker URL');
-      return;
-    }
-    try {
-      await rtdbPut(`vault/${currentUser.key}/tgConfig`, nextCfg);
-      tgConfig = nextCfg;
-      updateEngineStatusUI();
-      $('settingsModal').classList.add('hidden');
-      showToast('Telegram engine synced to all devices');
-    } catch (err) {
-      showToast(`Save failed: ${err.message}`);
-    }
-  }
-
-  async function testEnginePing() {
-    const workerUrl = $('cfgWorkerUrl').value.trim().replace(/\/+$/, '');
-    if (!workerUrl) {
-      showToast('Enter Worker URL first');
-      return;
-    }
-    const headers = {};
-    const tok = $('cfgBotToken').value.trim();
-    const chat = $('cfgChatId').value.trim();
-    if (tok) headers['X-TG-Token'] = tok;
-    if (chat) headers['X-TG-Chat'] = chat;
-
-    try {
-      showToast('Pinging Telegram Bot API...');
-      const res = await fetch(`${workerUrl}/ping`, { headers });
-      const data = await res.json();
-      if (data.ok && data.result?.username) {
-        showToast(`Connected: @${data.result.username}`);
-      } else {
-        showToast(`Ping error: ${data.error || data.description || 'Check token'}`);
-      }
-    } catch (err) {
-      showToast(`Worker unreachable: ${err.message}`);
-    }
-  }
-
-  // STORE ACTIONS
-  function parseTags() {
-    return $('itemTags').value
+  // CREATE / STORE ACTIONS
+  function parseTags(raw) {
+    return (raw || '')
       .split(',')
       .map((t) => t.trim().toLowerCase().replace(/[^a-z0-9_-]/g, ''))
       .filter(Boolean);
   }
 
+  function parseFolder(raw) {
+    const clean = (raw || '').trim().replace(/[.#$/[\]]/g, '');
+    return clean || 'General';
+  }
+
   async function storeFiles(fileList) {
     const files = Array.from(fileList || []);
     if (!files.length) return;
-    if (!getWorkerBase()) {
-      openSettingsModal();
-      showToast('Configure Telegram Engine first');
-      return;
-    }
 
     $('createModal').classList.add('hidden');
-    const tags = parseTags();
+    const tags = parseTags($('itemTags').value);
+    const folder = parseFolder($('itemFolder').value);
 
     for (const file of files) {
       try {
         const id = generateId();
         const rawBuffer = await file.arrayBuffer();
-        const { compressed, storedBytes, tgShards } = await uploadBufferToTelegram(id, rawBuffer, file.name);
+        const { compressed, storedBytes, shards } = await uploadBufferToCloud(id, rawBuffer, file.name);
 
         const meta = {
           id,
           kind: 'file',
           title: file.name,
+          folder,
+          accent: 'default',
           mime: file.type || 'application/octet-stream',
           size: file.size,
           storedBytes,
           compressed,
-          tgShards,
+          shards,
           encrypted: false,
           pinned: false,
           tags,
-          snippet: `${file.type || 'Binary File'} • ${tgShards.length} TG shard${tgShards.length > 1 ? 's' : ''}`,
+          snippet: file.type || 'File',
           createdAt: Date.now()
         };
 
-        await rtdbPut(`vault/${currentUser.key}/meta/${id}`, meta);
+        await indexPut(`vault/${currentUser.key}/meta/${id}`, meta);
         await edgeCache.set(`${currentUser.key}:${id}`, rawBuffer);
         itemsMap[id] = meta;
         renderVault();
-        showToast(`Stored ${file.name} on Telegram`);
+        showToast(`Stored ${file.name}`);
       } catch (err) {
         showToast(`Failed ${file.name}: ${err.message}`);
       }
@@ -729,15 +763,10 @@
     setTransferProgress(false);
     $('filePicker').value = '';
     $('itemTags').value = '';
+    $('itemFolder').value = '';
   }
 
   async function storeNote() {
-    if (!getWorkerBase()) {
-      openSettingsModal();
-      showToast('Configure Telegram Engine first');
-      return;
-    }
-
     const title = $('noteTitle').value.trim() || `Note ${new Date().toLocaleTimeString()}`;
     const body = $('noteBody').value;
     if (!body.trim()) {
@@ -748,34 +777,37 @@
     const isEncrypted = $('encryptToggle').dataset.active === 'true';
     const pass = $('encryptPass').value;
     if (isEncrypted && pass.length < 3) {
-      showToast('Enter an encryption passphrase (3+ chars)');
+      showToast('Enter a passphrase (3+ characters)');
       return;
     }
 
     try {
       const id = generateId();
-      const tags = parseTags();
+      const tags = parseTags($('itemTags').value);
+      const folder = parseFolder($('itemFolder').value);
       const payloadText = isEncrypted ? await encryptText(body, pass) : body;
       const rawBuffer = new TextEncoder().encode(payloadText).buffer;
-      const { compressed, storedBytes, tgShards } = await uploadBufferToTelegram(id, rawBuffer, `${title}.txt`);
+      const { compressed, storedBytes, shards } = await uploadBufferToCloud(id, rawBuffer, title);
 
       const meta = {
         id,
         kind: 'note',
         title,
+        folder,
+        accent: 'default',
         mime: 'text/plain;charset=utf-8',
         size: rawBuffer.byteLength,
         storedBytes,
         compressed,
-        tgShards,
+        shards,
         encrypted: isEncrypted,
         pinned: false,
         tags,
-        snippet: isEncrypted ? 'Encrypted AES-256 note on Telegram' : body.slice(0, 120),
+        snippet: isEncrypted ? 'Passphrase-protected note' : body.slice(0, 120),
         createdAt: Date.now()
       };
 
-      await rtdbPut(`vault/${currentUser.key}/meta/${id}`, meta);
+      await indexPut(`vault/${currentUser.key}/meta/${id}`, meta);
       await edgeCache.set(`${currentUser.key}:${id}`, rawBuffer);
       itemsMap[id] = meta;
       renderVault();
@@ -785,11 +817,12 @@
       $('noteBody').value = '';
       $('encryptPass').value = '';
       $('itemTags').value = '';
+      $('itemFolder').value = '';
       $('createModal').classList.add('hidden');
-      showToast(isEncrypted ? 'Encrypted note saved to Telegram' : 'Note saved to Telegram');
+      showToast('Note saved');
     } catch (err) {
       setTransferProgress(false);
-      showToast(`Error: ${err.message}`);
+      showToast(err.message || 'Unable to save note');
     }
   }
 
@@ -804,15 +837,18 @@
 
     try {
       const id = generateId();
-      const tags = parseTags();
+      const tags = parseTags($('itemTags').value);
+      const folder = parseFolder($('itemFolder').value);
       const meta = {
         id,
         kind: 'link',
         title,
+        folder,
+        accent: 'default',
         url,
         mime: 'text/uri-list',
         size: url.length,
-        tgShards: [],
+        shards: [],
         encrypted: false,
         pinned: false,
         tags,
@@ -820,31 +856,34 @@
         createdAt: Date.now()
       };
 
-      await rtdbPut(`vault/${currentUser.key}/meta/${id}`, meta);
+      await indexPut(`vault/${currentUser.key}/meta/${id}`, meta);
       itemsMap[id] = meta;
       renderVault();
 
       $('linkUrl').value = '';
       $('linkTitle').value = '';
       $('itemTags').value = '';
+      $('itemFolder').value = '';
       $('createModal').classList.add('hidden');
-      showToast('Bookmark saved');
+      showToast('Link saved');
     } catch (err) {
-      showToast(`Error: ${err.message}`);
+      showToast(err.message || 'Unable to save link');
     }
   }
 
-  // UNIVERSAL PREVIEWER
+  // PREVIEW & FILE CUSTOMIZATION
   function closePreview() {
     $('previewModal').classList.add('hidden');
     $('previewViewport').innerHTML = '';
     $('decryptPrompt').classList.add('hidden');
+    $('itemEditDrawer').classList.add('hidden');
     if (activeObjectUrl) {
       URL.revokeObjectURL(activeObjectUrl);
       activeObjectUrl = null;
     }
     activeItem = null;
     activePlainText = '';
+    activeDecryptedPass = '';
     deleteConfirmArmed = false;
   }
 
@@ -852,13 +891,13 @@
     closePreview();
     activeItem = item;
     $('previewTitle').textContent = item.title;
-    $('previewMeta').textContent = `${formatBytes(item.size || 0)} • ${item.mime || item.kind}`;
+    $('previewMeta').textContent = `${formatBytes(item.size || 0)} • ${item.folder || 'General'}`;
     $('previewPinBtn').style.color = item.pinned ? '#fbbf24' : '';
     $('previewModal').classList.remove('hidden');
 
     const viewport = $('previewViewport');
     viewport.classList.remove('hidden');
-    viewport.innerHTML = '<div class="muted-sub">Streaming from Telegram CDN...</div>';
+    viewport.innerHTML = '<div class="muted-sub">Loading from cloud...</div>';
 
     try {
       if (item.kind === 'link') {
@@ -866,13 +905,13 @@
         viewport.innerHTML = `
           <div style="text-align:center; display:flex; flex-direction:column; gap:14px; width:100%;">
             <div class="preview-text-box" style="text-align:center;">${escapeHtml(item.url)}</div>
-            <a href="${escapeHtml(item.url)}" target="_blank" rel="noopener noreferrer" class="pill-btn primary-pill" style="text-decoration:none; max-width:240px; margin:0 auto;">Open Destination ↗</a>
+            <a href="${escapeHtml(item.url)}" target="_blank" rel="noopener noreferrer" class="pill-btn primary-pill" style="text-decoration:none; max-width:240px; margin:0 auto;">Open Link ↗</a>
           </div>
         `;
         return;
       }
 
-      const rawBuf = await downloadBufferFromTelegram(item);
+      const rawBuf = await downloadBufferFromCloud(item);
 
       if (item.encrypted) {
         viewport.classList.add('hidden');
@@ -885,7 +924,7 @@
       renderUnencryptedPayload(item, rawBuf);
     } catch (err) {
       setTransferProgress(false);
-      viewport.innerHTML = `<div class="muted-sub">Failed to load: ${escapeHtml(err.message)}</div>`;
+      viewport.innerHTML = `<div class="muted-sub">Unable to load: ${escapeHtml(err.message)}</div>`;
     }
   }
 
@@ -911,7 +950,7 @@
         <div style="text-align:center; display:flex; flex-direction:column; gap:12px;">
           <div style="font-size:38px;">📦</div>
           <div style="font-weight:650;">${escapeHtml(item.title)}</div>
-          <div class="muted-sub">${formatBytes(item.size || 0)} • Reassembled from ${(item.tgShards || []).length} Telegram shard(s)</div>
+          <div class="muted-sub">${formatBytes(item.size || 0)} • Ready to download</div>
         </div>
       `;
     }
@@ -927,10 +966,111 @@
       $('decryptPrompt').classList.add('hidden');
       $('previewViewport').classList.remove('hidden');
       activePlainText = plain;
+      activeDecryptedPass = pass;
       $('previewViewport').innerHTML = `<div class="preview-text-box">${escapeHtml(plain)}</div>`;
-      showToast('Decrypted');
+      showToast('Unlocked');
     } catch {
       showToast('Incorrect passphrase');
+    }
+  }
+
+  function toggleItemCustomizeDrawer() {
+    if (!activeItem) return;
+    const drawer = $('itemEditDrawer');
+    const opening = drawer.classList.contains('hidden');
+    if (!opening) {
+      drawer.classList.add('hidden');
+      return;
+    }
+
+    $('editItemTitle').value = activeItem.title || '';
+    $('editItemFolder').value = activeItem.folder || 'General';
+    $('editItemTags').value = (activeItem.tags || []).join(', ');
+    selectedCardAccent = activeItem.accent || 'default';
+    document.querySelectorAll('#cardColorPicker .swatch-dot').forEach((d) => {
+      d.classList.toggle('active', d.dataset.color === selectedCardAccent);
+    });
+
+    const isLink = activeItem.kind === 'link';
+    const isEditableNote = activeItem.kind === 'note' && (!activeItem.encrypted || Boolean(activePlainText));
+
+    $('editUrlWrap').classList.toggle('hidden', !isLink);
+    if (isLink) $('editItemUrl').value = activeItem.url || '';
+
+    $('editNoteBodyWrap').classList.toggle('hidden', !isEditableNote);
+    if (isEditableNote) $('editItemBody').value = activePlainText || '';
+
+    drawer.classList.remove('hidden');
+  }
+
+  async function saveItemCustomizations() {
+    if (!activeItem) return;
+    const nextTitle = $('editItemTitle').value.trim() || activeItem.title;
+    const nextFolder = parseFolder($('editItemFolder').value);
+    const nextTags = parseTags($('editItemTags').value);
+    const nextAccent = selectedCardAccent;
+
+    const patch = {
+      title: nextTitle,
+      folder: nextFolder,
+      tags: nextTags,
+      accent: nextAccent
+    };
+
+    try {
+      if (activeItem.kind === 'link') {
+        let nextUrl = $('editItemUrl').value.trim() || activeItem.url;
+        if (!/^https?:\/\//i.test(nextUrl)) nextUrl = `https://${nextUrl}`;
+        patch.url = nextUrl;
+        patch.snippet = nextUrl;
+        patch.size = nextUrl.length;
+        activePlainText = nextUrl;
+      } else if (activeItem.kind === 'note' && !$('editNoteBodyWrap').classList.contains('hidden')) {
+        const nextBody = $('editItemBody').value;
+        if (nextBody !== activePlainText) {
+          const payloadText = activeItem.encrypted && activeDecryptedPass
+            ? await encryptText(nextBody, activeDecryptedPass)
+            : nextBody;
+          const rawBuffer = new TextEncoder().encode(payloadText).buffer;
+          const oldShards = activeItem.shards || activeItem.tgShards || [];
+          const { compressed, storedBytes, shards } = await uploadBufferToCloud(activeItem.id, rawBuffer, nextTitle);
+          eraseRemoteShards(oldShards);
+
+          patch.size = rawBuffer.byteLength;
+          patch.storedBytes = storedBytes;
+          patch.compressed = compressed;
+          patch.shards = shards;
+          patch.snippet = activeItem.encrypted ? 'Passphrase-protected note' : nextBody.slice(0, 120);
+          activePlainText = nextBody;
+          await edgeCache.set(`${currentUser.key}:${activeItem.id}`, rawBuffer);
+          setTransferProgress(false);
+        }
+      }
+
+      await indexPatch(`vault/${currentUser.key}/meta/${activeItem.id}`, patch);
+      Object.assign(activeItem, patch);
+      itemsMap[activeItem.id] = activeItem;
+
+      $('previewTitle').textContent = activeItem.title;
+      $('previewMeta').textContent = `${formatBytes(activeItem.size || 0)} • ${activeItem.folder}`;
+      if (activeItem.kind === 'note' && !$('editNoteBodyWrap').classList.contains('hidden')) {
+        $('previewViewport').innerHTML = `<div class="preview-text-box">${escapeHtml(activePlainText)}</div>`;
+      }
+      if (activeItem.kind === 'link') {
+        $('previewViewport').innerHTML = `
+          <div style="text-align:center; display:flex; flex-direction:column; gap:14px; width:100%;">
+            <div class="preview-text-box" style="text-align:center;">${escapeHtml(activeItem.url)}</div>
+            <a href="${escapeHtml(activeItem.url)}" target="_blank" rel="noopener noreferrer" class="pill-btn primary-pill" style="text-decoration:none; max-width:240px; margin:0 auto;">Open Link ↗</a>
+          </div>
+        `;
+      }
+
+      $('itemEditDrawer').classList.add('hidden');
+      renderVault();
+      showToast('File updated');
+    } catch (err) {
+      setTransferProgress(false);
+      showToast(err.message || 'Update failed');
     }
   }
 
@@ -941,7 +1081,7 @@
     itemsMap[activeItem.id].pinned = nextPin;
     $('previewPinBtn').style.color = nextPin ? '#fbbf24' : '';
     renderVault();
-    await rtdbPatch(`vault/${currentUser.key}/meta/${activeItem.id}`, { pinned: nextPin });
+    await indexPatch(`vault/${currentUser.key}/meta/${activeItem.id}`, { pinned: nextPin });
     showToast(nextPin ? 'Pinned to top' : 'Unpinned');
   }
 
@@ -966,7 +1106,7 @@
       ? URL.createObjectURL(new Blob([activePlainText], { type: 'text/plain;charset=utf-8' }))
       : activeObjectUrl;
     if (!url) {
-      showToast('Wait for Telegram stream to finish');
+      showToast('Wait for file to finish loading');
       return;
     }
     const a = document.createElement('a');
@@ -982,40 +1122,141 @@
     if (!activeItem) return;
     if (!deleteConfirmArmed) {
       deleteConfirmArmed = true;
-      showToast('Tap delete again to erase from RTDB & Telegram');
+      showToast('Tap delete again to permanently remove');
       setTimeout(() => { deleteConfirmArmed = false; }, 3500);
       return;
     }
     const target = activeItem;
     closePreview();
     try {
-      const messageIds = (target.tgShards || []).map((s) => s.messageId).filter(Boolean);
-      const workerUrl = getWorkerBase();
-      if (workerUrl && messageIds.length) {
-        fetch(`${workerUrl}/delete`, {
-          method: 'POST',
-          headers: { ...getTgHeaders(), 'Content-Type': 'application/json' },
-          body: JSON.stringify({ messageIds })
-        }).catch(() => {});
-      }
+      eraseRemoteShards(target.shards || target.tgShards || []);
       await Promise.all([
-        rtdbDelete(`vault/${currentUser.key}/meta/${target.id}`),
+        indexDelete(`vault/${currentUser.key}/meta/${target.id}`),
         edgeCache.del(`${currentUser.key}:${target.id}`)
       ]);
       delete itemsMap[target.id];
       renderVault();
-      showToast('Erased from Vault & Telegram');
-    } catch (err) {
-      showToast(`Delete failed: ${err.message}`);
+      showToast('Item deleted');
+    } catch {
+      showToast('Could not delete item');
     }
   }
 
-  function exportVaultManifest() {
+  // ACCOUNT CUSTOMIZATION & FULL ACCOUNT CONTROL
+  function openAccountModal(tab = 'profile') {
+    if (!currentUser) return;
+    pendingAvatarData = undefined;
+    purgeConfirmArmed = false;
+    deleteAccountArmed = false;
+
+    $('accDisplayName').value = currentUser.displayName || currentUser.handle || '';
+    $('accBio').value = currentUser.bio || '';
+    const initial = (currentUser.displayName || currentUser.handle || 'T').charAt(0).toUpperCase();
+    $('accAvatarInitial').textContent = initial;
+
+    if (currentUser.avatarData) {
+      $('accAvatarPreview').src = currentUser.avatarData;
+      $('accAvatarPreview').classList.remove('hidden');
+      $('accAvatarInitial').classList.add('hidden');
+    } else {
+      $('accAvatarPreview').classList.add('hidden');
+      $('accAvatarInitial').classList.remove('hidden');
+    }
+
+    selectedTheme = currentUser.theme || 'indigo';
+    document.querySelectorAll('#themePicker .swatch-dot').forEach((d) => {
+      d.classList.toggle('active', d.dataset.theme === selectedTheme);
+    });
+
+    // Storage telemetry breakdown
+    const allItems = Object.values(itemsMap);
+    const totalBytes = allItems.reduce((a, b) => a + (b.size || 0), 0);
+    const mediaCount = allItems.filter((i) => /^(image|video|audio)\//.test(i.mime || '')).length;
+    const fileCount = allItems.filter((i) => i.kind === 'file').length;
+    const noteCount = allItems.filter((i) => i.kind === 'note').length;
+    const linkCount = allItems.filter((i) => i.kind === 'link').length;
+
+    $('accTotalSize').textContent = formatBytes(totalBytes);
+    $('accBreakdownGrid').innerHTML = `
+      <div class="breakdown-cell">Files<strong>${fileCount}</strong></div>
+      <div class="breakdown-cell">Media<strong>${mediaCount}</strong></div>
+      <div class="breakdown-cell">Notes<strong>${noteCount}</strong></div>
+      <div class="breakdown-cell">Links<strong>${linkCount}</strong></div>
+    `;
+
+    switchAccountTab(tab);
+    $('accountModal').classList.remove('hidden');
+  }
+
+  function switchAccountTab(tab) {
+    document.querySelectorAll('[data-acc-tab]').forEach((el) => {
+      el.classList.toggle('active', el.dataset.accTab === tab);
+    });
+    $('accPaneProfile').classList.toggle('hidden', tab !== 'profile');
+    $('accPaneStorage').classList.toggle('hidden', tab !== 'storage');
+    $('accPaneSecurity').classList.toggle('hidden', tab !== 'security');
+  }
+
+  function handleAvatarPick(file) {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        const size = 192;
+        const canvas = document.createElement('canvas');
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext('2d');
+        const minSide = Math.min(img.width, img.height);
+        const sx = (img.width - minSide) / 2;
+        const sy = (img.height - minSide) / 2;
+        ctx.drawImage(img, sx, sy, minSide, minSide, 0, 0, size, size);
+        pendingAvatarData = canvas.toDataURL('image/jpeg', 0.82);
+
+        $('accAvatarPreview').src = pendingAvatarData;
+        $('accAvatarPreview').classList.remove('hidden');
+        $('accAvatarInitial').classList.add('hidden');
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  }
+
+  async function saveAccountProfile() {
+    if (!currentUser) return;
+    const displayName = $('accDisplayName').value.trim() || currentUser.handle;
+    const bio = $('accBio').value.trim();
+    const avatarData = pendingAvatarData !== undefined ? pendingAvatarData : (currentUser.avatarData || '');
+
+    try {
+      await indexPatch(`users/${currentUser.key}`, {
+        displayName,
+        bio,
+        theme: selectedTheme,
+        avatarData
+      });
+      currentUser.displayName = displayName;
+      currentUser.bio = bio;
+      currentUser.theme = selectedTheme;
+      currentUser.avatarData = avatarData;
+      renderUserProfileHeader();
+      $('accountModal').classList.add('hidden');
+      showToast('Profile saved');
+    } catch {
+      showToast('Could not save profile');
+    }
+  }
+
+  function exportAccountBackup() {
     if (!currentUser) return;
     const payload = JSON.stringify({
       app: 'Only Me Ted',
-      storageEngine: 'Telegram Bot API Sharded Index',
-      vault: currentUser.handle,
+      account: {
+        username: currentUser.handle,
+        displayName: currentUser.displayName,
+        bio: currentUser.bio
+      },
       exportedAt: new Date().toISOString(),
       items: itemsMap
     }, null, 2);
@@ -1023,12 +1264,99 @@
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `onlymeted-${currentUser.key}-manifest.json`;
+    a.download = `only-me-ted-${currentUser.key}-backup.json`;
     document.body.appendChild(a);
     a.click();
     a.remove();
     URL.revokeObjectURL(url);
-    showToast('Manifest exported');
+    showToast('Backup downloaded');
+  }
+
+  async function purgeAllVaultData() {
+    if (!currentUser) return;
+    if (!purgeConfirmArmed) {
+      purgeConfirmArmed = true;
+      showToast('Tap again to erase all items in your vault');
+      setTimeout(() => { purgeConfirmArmed = false; }, 3500);
+      return;
+    }
+    purgeConfirmArmed = false;
+    try {
+      const all = Object.values(itemsMap);
+      for (const it of all) {
+        eraseRemoteShards(it.shards || it.tgShards || []);
+        await edgeCache.del(`${currentUser.key}:${it.id}`);
+      }
+      await indexDelete(`vault/${currentUser.key}/meta`);
+      itemsMap = {};
+      renderVault();
+      $('accountModal').classList.add('hidden');
+      showToast('All vault items erased');
+    } catch {
+      showToast('Unable to purge items');
+    }
+  }
+
+  async function updateAccountPassword() {
+    if (!currentUser) return;
+    const oldPass = $('secOldPass').value;
+    const newPass = $('secNewPass').value;
+    const confirmPass = $('secConfirmPass').value;
+
+    if (newPass.length < 4) {
+      showToast('New password must be at least 4 characters');
+      return;
+    }
+    if (newPass !== confirmPass) {
+      showToast('New passwords do not match');
+      return;
+    }
+
+    try {
+      const record = await indexGet(`users/${currentUser.key}`);
+      const oldHash = await sha256Hex(`${record.salt}:${oldPass}`);
+      if (oldHash !== record.hash) {
+        showToast('Current password is incorrect');
+        return;
+      }
+      const nextSalt = randomHex(16);
+      const nextHash = await sha256Hex(`${nextSalt}:${newPass}`);
+      await indexPatch(`users/${currentUser.key}`, { salt: nextSalt, hash: nextHash });
+
+      $('secOldPass').value = '';
+      $('secNewPass').value = '';
+      $('secConfirmPass').value = '';
+      showToast('Password updated');
+    } catch {
+      showToast('Could not update password');
+    }
+  }
+
+  async function deleteAccountPermanently() {
+    if (!currentUser) return;
+    if (!deleteAccountArmed) {
+      deleteAccountArmed = true;
+      showToast('Tap again to permanently delete your account');
+      setTimeout(() => { deleteAccountArmed = false; }, 3500);
+      return;
+    }
+    deleteAccountArmed = false;
+    try {
+      const all = Object.values(itemsMap);
+      for (const it of all) {
+        eraseRemoteShards(it.shards || it.tgShards || []);
+        await edgeCache.del(`${currentUser.key}:${it.id}`);
+      }
+      await Promise.all([
+        indexDelete(`vault/${currentUser.key}`),
+        indexDelete(`users/${currentUser.key}`)
+      ]);
+      $('accountModal').classList.add('hidden');
+      signOut();
+      showToast('Account permanently deleted');
+    } catch {
+      showToast('Could not delete account');
+    }
   }
 
   function openCreateModal(tab = 'files') {
@@ -1041,7 +1369,7 @@
     $('paneLink').classList.toggle('hidden', tab !== 'link');
   }
 
-  // BINDINGS
+  // EVENT BINDINGS
   bindDivButton($('tabLogin'), () => setAuthMode('login'));
   bindDivButton($('tabSignup'), () => setAuthMode('signup'));
   bindDivButton($('authSubmitBtn'), handleAuthSubmit);
@@ -1052,15 +1380,37 @@
     });
   });
 
-  bindDivButton($('settingsBtn'), openSettingsModal);
-  bindDivButton($('openSetupFromBanner'), openSettingsModal);
-  bindDivButton($('closeSettingsBtn'), () => $('settingsModal').classList.add('hidden'));
-  bindDivButton($('saveEngineBtn'), saveEngineConfig);
-  bindDivButton($('testEngineBtn'), testEnginePing);
-
+  bindDivButton($('headerAvatarBtn'), () => openAccountModal('profile'));
+  bindDivButton($('accountBtn'), () => openAccountModal('profile'));
+  bindDivButton($('closeAccountBtn'), () => $('accountModal').classList.add('hidden'));
   bindDivButton($('syncNowBtn'), () => syncVault(false));
-  bindDivButton($('exportVaultBtn'), exportVaultManifest);
   bindDivButton($('logoutBtn'), signOut);
+
+  document.querySelectorAll('[data-acc-tab]').forEach((tab) => {
+    bindDivButton(tab, () => switchAccountTab(tab.dataset.accTab));
+  });
+
+  $('avatarFileInput').addEventListener('change', (e) => handleAvatarPick(e.target.files?.[0]));
+  bindDivButton($('removeAvatarBtn'), () => {
+    pendingAvatarData = '';
+    $('accAvatarPreview').classList.add('hidden');
+    $('accAvatarInitial').classList.remove('hidden');
+  });
+
+  document.querySelectorAll('#themePicker .swatch-dot').forEach((dot) => {
+    bindDivButton(dot, () => {
+      selectedTheme = dot.dataset.theme;
+      applyTheme(selectedTheme);
+      document.querySelectorAll('#themePicker .swatch-dot').forEach((d) => d.classList.remove('active'));
+      dot.classList.add('active');
+    });
+  });
+
+  bindDivButton($('saveProfileBtn'), saveAccountProfile);
+  bindDivButton($('exportDataBtn'), exportAccountBackup);
+  bindDivButton($('purgeVaultBtn'), purgeAllVaultData);
+  bindDivButton($('changePassBtn'), updateAccountPassword);
+  bindDivButton($('deleteAccountBtn'), deleteAccountPermanently);
 
   $('searchInput').addEventListener('input', (e) => {
     searchQuery = e.target.value;
@@ -1108,11 +1458,21 @@
   bindDivButton($('closePreviewBtn'), closePreview);
   bindDivButton($('unlockItemBtn'), handleDecrypt);
   bindDivButton($('previewPinBtn'), togglePinActive);
+  bindDivButton($('previewEditBtn'), toggleItemCustomizeDrawer);
+  bindDivButton($('saveItemEditBtn'), saveItemCustomizations);
   bindDivButton($('previewCopyBtn'), copyActive);
   bindDivButton($('previewDownloadBtn'), downloadActive);
   bindDivButton($('previewDeleteBtn'), deleteActive);
 
-  // DRAG & DROP
+  document.querySelectorAll('#cardColorPicker .swatch-dot').forEach((dot) => {
+    bindDivButton(dot, () => {
+      selectedCardAccent = dot.dataset.color;
+      document.querySelectorAll('#cardColorPicker .swatch-dot').forEach((d) => d.classList.remove('active'));
+      dot.classList.add('active');
+    });
+  });
+
+  // GLOBAL DRAG & DROP
   let dragDepth = 0;
   window.addEventListener('dragenter', (e) => {
     if (!currentUser) return;
@@ -1142,7 +1502,7 @@
     }
   });
 
-  // GLOBAL PASTE
+  // GLOBAL CLIPBOARD PASTE
   window.addEventListener('paste', (e) => {
     if (!currentUser) return;
     const tag = document.activeElement?.tagName;
@@ -1166,7 +1526,14 @@
   try {
     const saved = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null');
     if (saved && saved.key) {
-      currentUser = saved;
+      currentUser = {
+        key: saved.key,
+        handle: saved.handle,
+        displayName: saved.handle,
+        bio: '',
+        theme: 'indigo',
+        avatarData: ''
+      };
       enterWorkspace();
     }
   } catch {}

@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="apple-mobile-web-app-title" content="Only Me Ted" />
-  <meta name="description" content="Only Me Ted — Unlimited Telegram-Backed Cloud Vault" />
+  <meta name="description" content="Only Me Ted — Personal Unlimited Cloud Vault" />
   <title>Only Me Ted</title>
   <link rel="icon" type="image/png" href="favicon.png" />
   <link rel="apple-touch-icon" href="favicon.png" />
@@ -25,34 +25,34 @@
     <section class="silk-card auth-card">
       <div class="brand-header">
         <img src="favicon.png" alt="Only Me Ted" class="brand-logo" onerror="this.style.display='none'" />
-        <div class="brand-badge">UNLIMITED TELEGRAM ENGINE</div>
+        <div class="brand-badge">∞ UNLIMITED PERSONAL CLOUD</div>
         <h1>Only Me Ted</h1>
-        <p class="muted-sub">Zero Firebase file traffic. Instant global access.</p>
+        <p class="muted-sub">Store everything. Instant access from anywhere.</p>
       </div>
 
       <div class="capsule-tabs" role="tablist">
         <div id="tabLogin" class="capsule-tab active" role="button" tabindex="0" data-auth-mode="login">Sign In</div>
-        <div id="tabSignup" class="capsule-tab" role="button" tabindex="0" data-auth-mode="signup">Create Vault</div>
+        <div id="tabSignup" class="capsule-tab" role="button" tabindex="0" data-auth-mode="signup">Create Account</div>
       </div>
 
       <div class="form-stack">
         <div class="input-well">
-          <label for="authUsername">Vault Handle</label>
-          <input id="authUsername" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" placeholder="e.g. ted_vault" />
+          <label for="authUsername">Username</label>
+          <input id="authUsername" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" placeholder="Enter your username" />
         </div>
 
         <div class="input-well">
-          <label for="authPassword">Master Key</label>
+          <label for="authPassword">Password</label>
           <input id="authPassword" type="password" autocomplete="current-password" placeholder="••••••••" />
         </div>
 
         <div id="confirmWrap" class="input-well hidden">
-          <label for="authConfirm">Confirm Master Key</label>
+          <label for="authConfirm">Confirm Password</label>
           <input id="authConfirm" type="password" autocomplete="new-password" placeholder="••••••••" />
         </div>
 
         <div id="authSubmitBtn" class="pill-btn primary-pill" role="button" tabindex="0">
-          <span id="authSubmitLabel">Unlock Vault</span>
+          <span id="authSubmitLabel">Sign In</span>
         </div>
       </div>
 
@@ -64,40 +64,34 @@
   <div id="appView" class="viewport-shell app-shell hidden">
     <header class="top-bar">
       <div class="top-left">
-        <img src="favicon.png" alt="Logo" class="mini-logo" onerror="this.style.display='none'" />
-        <div>
+        <div id="headerAvatarBtn" class="avatar-trigger" role="button" tabindex="0" title="Account & Customization">
+          <img id="headerAvatarImg" class="avatar-img hidden" alt="Profile" />
+          <span id="headerAvatarInitial">T</span>
+        </div>
+        <div class="brand-stack">
           <div class="app-title-row">
-            <span class="app-name">Only Me Ted</span>
-            <span id="syncDot" class="sync-pill" title="Engine Status">
-              <span class="dot"></span><span id="syncText">Live</span>
+            <img src="favicon.png" alt="" class="inline-favicon" onerror="this.style.display='none'" />
+            <span id="headerGreeting" class="app-name">Only Me Ted</span>
+            <span id="syncDot" class="sync-pill">
+              <span class="dot"></span><span id="syncText">Synced</span>
             </span>
           </div>
-          <div id="vaultStats" class="stats-line">0 items • 0 B on Telegram • 0 KB RTDB</div>
+          <div id="vaultStats" class="stats-line">0 items • 0 B stored • ∞ Unlimited</div>
         </div>
       </div>
 
       <div class="top-actions">
-        <div id="settingsBtn" class="icon-pill" role="button" tabindex="0" title="Telegram Engine Settings">⚙</div>
-        <div id="syncNowBtn" class="icon-pill" role="button" tabindex="0" title="Sync Index">↻</div>
-        <div id="exportVaultBtn" class="icon-pill" role="button" tabindex="0" title="Export Manifest">↓</div>
+        <div id="accountBtn" class="icon-pill" role="button" tabindex="0" title="Account & Customization">👤</div>
+        <div id="syncNowBtn" class="icon-pill" role="button" tabindex="0" title="Refresh Vault">↻</div>
         <div id="logoutBtn" class="icon-pill danger-pill" role="button" tabindex="0" title="Lock & Sign Out">⏻</div>
       </div>
     </header>
 
-    <!-- SETUP CALLOUT BANNER (SHOWN UNTIL WORKER IS CONFIGURED) -->
-    <div id="setupBanner" class="setup-banner hidden">
-      <div>
-        <strong>Connect Telegram Storage Engine</strong>
-        <div class="muted-sub">Link your Cloudflare Worker URL, Bot Token & Channel ID once to unlock unlimited storage.</div>
-      </div>
-      <div id="openSetupFromBanner" class="pill-btn primary-pill compact-pill" role="button" tabindex="0">Configure</div>
-    </div>
-
-    <!-- SEARCH & FILTER RIBBON -->
+    <!-- SEARCH, TYPE & FOLDER RIBBON -->
     <section class="control-ribbon">
       <div class="search-well">
         <span class="search-glyph">⌕</span>
-        <input id="searchInput" type="search" placeholder="Search files, notes, links, tags... (or Ctrl+V to paste)" />
+        <input id="searchInput" type="search" placeholder="Search files, folders, notes, links, tags... (or paste anywhere)" />
         <div id="clearSearchBtn" class="clear-x hidden" role="button" tabindex="0">✕</div>
       </div>
 
@@ -110,6 +104,8 @@
         <div class="filter-chip" role="button" tabindex="0" data-filter="link">Links</div>
         <div class="filter-chip" role="button" tabindex="0" data-filter="locked">Encrypted</div>
       </div>
+
+      <div id="folderBar" class="filter-scroller folder-scroller hidden"></div>
     </section>
 
     <!-- VAULT STAGE -->
@@ -117,14 +113,14 @@
       <div id="dropOverlay" class="drop-overlay hidden">
         <div class="drop-box">
           <div class="drop-icon">⇧</div>
-          <div class="drop-title">Release to Stream to Telegram</div>
-          <div class="drop-sub">18 MB binary shards • Zero Firebase file traffic</div>
+          <div class="drop-title">Drop Anywhere to Store</div>
+          <div class="drop-sub">Unlimited file size • Instant global availability</div>
         </div>
       </div>
 
       <div id="transferBanner" class="transfer-banner hidden">
         <div class="transfer-head">
-          <span id="transferTitle">Streaming shard...</span>
+          <span id="transferTitle">Uploading...</span>
           <span id="transferPct">0%</span>
         </div>
         <div class="progress-track">
@@ -133,9 +129,9 @@
       </div>
 
       <div id="emptyState" class="empty-state hidden">
-        <div class="empty-orb">✦</div>
-        <h2>Unlimited Vault Ready</h2>
-        <p>Drop any file, paste from clipboard, or tap <strong>＋ Store Anything</strong> below.</p>
+        <div class="empty-orb">∞</div>
+        <h2>Your Infinite Vault is Ready</h2>
+        <p>Drop any file, paste from your clipboard, or tap <strong>＋ Upload</strong> below.</p>
       </div>
 
       <div id="vaultGrid" class="vault-grid"></div>
@@ -146,7 +142,7 @@
     <!-- FLOATING ACTION DOCK -->
     <nav class="action-dock">
       <div id="openUploadBtn" class="dock-btn primary-pill" role="button" tabindex="0">
-        <span>＋ Store Anything</span>
+        <span>＋ Upload</span>
       </div>
       <div id="quickNoteBtn" class="dock-btn glass-pill" role="button" tabindex="0">
         <span>✎ Note</span>
@@ -157,52 +153,16 @@
     </nav>
   </div>
 
-  <!-- TELEGRAM ENGINE SETTINGS MODAL -->
-  <div id="settingsModal" class="modal-backdrop hidden">
-    <div class="silk-card modal-card">
-      <div class="modal-head">
-        <h3>Telegram Unlimited Engine</h3>
-        <div id="closeSettingsBtn" class="icon-pill" role="button" tabindex="0">✕</div>
-      </div>
-
-      <p class="muted-sub">
-        Your credentials sync to <code>/onlymeted/vault/{user}/tgConfig</code> so all your devices connect automatically. If you set <code>BOT_TOKEN</code> and <code>CHAT_ID</code> as Cloudflare Worker secrets, you can leave those two fields blank.
-      </p>
-
-      <div class="form-stack">
-        <div class="input-well">
-          <label for="cfgWorkerUrl">Cloudflare Worker Relay URL</label>
-          <input id="cfgWorkerUrl" type="url" placeholder="https://onlymeted-tg.your-subdomain.workers.dev" />
-        </div>
-
-        <div class="input-well">
-          <label for="cfgBotToken">Telegram Bot Token (from @BotFather)</label>
-          <input id="cfgBotToken" type="password" placeholder="123456789:AAH..." />
-        </div>
-
-        <div class="input-well">
-          <label for="cfgChatId">Private Channel / Chat ID</label>
-          <input id="cfgChatId" type="text" placeholder="-1001234567890" />
-        </div>
-
-        <div class="btn-row">
-          <div id="testEngineBtn" class="pill-btn glass-pill" role="button" tabindex="0" style="flex:1;">Test Ping</div>
-          <div id="saveEngineBtn" class="pill-btn primary-pill" role="button" tabindex="0" style="flex:2;">Save & Sync Config</div>
-        </div>
-      </div>
-    </div>
-  </div>
-
   <!-- CREATE / STORE MODAL -->
   <div id="createModal" class="modal-backdrop hidden">
     <div class="silk-card modal-card">
       <div class="modal-head">
-        <h3>Store in Unlimited Vault</h3>
+        <h3>Add to Vault</h3>
         <div id="closeCreateBtn" class="icon-pill" role="button" tabindex="0">✕</div>
       </div>
 
       <div class="capsule-tabs">
-        <div class="capsule-tab active" role="button" tabindex="0" data-create-tab="files">Any File</div>
+        <div class="capsule-tab active" role="button" tabindex="0" data-create-tab="files">Files</div>
         <div class="capsule-tab" role="button" tabindex="0" data-create-tab="note">Note / Code</div>
         <div class="capsule-tab" role="button" tabindex="0" data-create-tab="link">Web Link</div>
       </div>
@@ -210,8 +170,8 @@
       <div id="paneFiles" class="create-pane">
         <label for="filePicker" class="file-drop-well">
           <div class="file-drop-glyph">⇪</div>
-          <div class="file-drop-title">Tap to select files or drop anywhere</div>
-          <div class="file-drop-hint">Videos, ZIPs, APKs, RAW photos, PDFs — sliced into 18 MB Telegram shards</div>
+          <div class="file-drop-title">Tap to choose files or drag & drop</div>
+          <div class="file-drop-hint">Photos, videos, documents, archives, APKs — no size cap</div>
         </label>
         <input id="filePicker" type="file" multiple class="hidden" />
       </div>
@@ -219,7 +179,7 @@
       <div id="paneNote" class="create-pane hidden">
         <div class="input-well">
           <label for="noteTitle">Title</label>
-          <input id="noteTitle" type="text" placeholder="Snippet, key, or document title..." />
+          <input id="noteTitle" type="text" placeholder="Note or snippet title..." />
         </div>
         <div class="input-well">
           <label for="noteBody">Content</label>
@@ -228,14 +188,14 @@
         <div class="encrypt-row">
           <div id="encryptToggle" class="toggle-pill" role="button" tabindex="0" data-active="false">
             <span class="toggle-dot"></span>
-            <span>AES-256 Zero-Knowledge Lock</span>
+            <span>Encrypt with Passphrase</span>
           </div>
         </div>
         <div id="encryptPassWrap" class="input-well hidden">
-          <label for="encryptPass">Encryption Passphrase</label>
-          <input id="encryptPass" type="password" placeholder="Required to decrypt later" />
+          <label for="encryptPass">Passphrase</label>
+          <input id="encryptPass" type="password" placeholder="Required to unlock later" />
         </div>
-        <div id="saveNoteBtn" class="pill-btn primary-pill" role="button" tabindex="0">Save Note to Telegram</div>
+        <div id="saveNoteBtn" class="pill-btn primary-pill" role="button" tabindex="0">Save Note</div>
       </div>
 
       <div id="paneLink" class="create-pane hidden">
@@ -244,20 +204,26 @@
           <input id="linkUrl" type="url" placeholder="https://..." />
         </div>
         <div class="input-well">
-          <label for="linkTitle">Label (optional)</label>
-          <input id="linkTitle" type="text" placeholder="Custom bookmark name" />
+          <label for="linkTitle">Title (optional)</label>
+          <input id="linkTitle" type="text" placeholder="Custom bookmark label" />
         </div>
-        <div id="saveLinkBtn" class="pill-btn primary-pill" role="button" tabindex="0">Save Bookmark</div>
+        <div id="saveLinkBtn" class="pill-btn primary-pill" role="button" tabindex="0">Save Link</div>
       </div>
 
-      <div class="input-well">
-        <label for="itemTags">Tags (comma separated)</label>
-        <input id="itemTags" type="text" placeholder="work, backups, media" />
+      <div class="two-col-inputs">
+        <div class="input-well">
+          <label for="itemFolder">Folder</label>
+          <input id="itemFolder" type="text" placeholder="General" />
+        </div>
+        <div class="input-well">
+          <label for="itemTags">Tags</label>
+          <input id="itemTags" type="text" placeholder="work, personal" />
+        </div>
       </div>
     </div>
   </div>
 
-  <!-- UNIVERSAL PREVIEW MODAL -->
+  <!-- UNIVERSAL PREVIEW & FILE CUSTOMIZATION MODAL -->
   <div id="previewModal" class="modal-backdrop hidden">
     <div class="silk-card modal-card preview-card">
       <div class="modal-head">
@@ -266,24 +232,161 @@
           <span id="previewMeta" class="preview-sub"></span>
         </div>
         <div class="preview-actions">
-          <div id="previewPinBtn" class="icon-pill" role="button" tabindex="0" title="Pin">★</div>
+          <div id="previewPinBtn" class="icon-pill" role="button" tabindex="0" title="Pin to Top">★</div>
+          <div id="previewEditBtn" class="icon-pill" role="button" tabindex="0" title="Customize File">✎</div>
           <div id="previewCopyBtn" class="icon-pill" role="button" tabindex="0" title="Copy">⧉</div>
           <div id="previewDownloadBtn" class="icon-pill" role="button" tabindex="0" title="Download">↓</div>
           <div id="previewDeleteBtn" class="icon-pill danger-pill" role="button" tabindex="0" title="Delete">⌫</div>
-          <div id="closePreviewBtn" class="icon-pill" role="button" tabindex="0">✕</div>
+          <div id="closePreviewBtn" class="icon-pill" role="button" tabindex="0" title="Close">✕</div>
         </div>
+      </div>
+
+      <!-- FILE CUSTOMIZATION DRAWER -->
+      <div id="itemEditDrawer" class="edit-drawer hidden">
+        <div class="two-col-inputs">
+          <div class="input-well">
+            <label for="editItemTitle">Display Name</label>
+            <input id="editItemTitle" type="text" />
+          </div>
+          <div class="input-well">
+            <label for="editItemFolder">Folder</label>
+            <input id="editItemFolder" type="text" placeholder="General" />
+          </div>
+        </div>
+
+        <div class="input-well">
+          <label for="editItemTags">Tags (comma separated)</label>
+          <input id="editItemTags" type="text" placeholder="tag1, tag2" />
+        </div>
+
+        <div id="editUrlWrap" class="input-well hidden">
+          <label for="editItemUrl">Destination URL</label>
+          <input id="editItemUrl" type="url" />
+        </div>
+
+        <div id="editNoteBodyWrap" class="input-well hidden">
+          <label for="editItemBody">Edit Content</label>
+          <textarea id="editItemBody" rows="5"></textarea>
+        </div>
+
+        <div class="input-well">
+          <label>Card Accent</label>
+          <div id="cardColorPicker" class="swatch-row">
+            <div class="swatch-dot active" role="button" tabindex="0" data-color="default" title="Default"></div>
+            <div class="swatch-dot" role="button" tabindex="0" data-color="indigo" style="--sw:#6c8cff;" title="Indigo"></div>
+            <div class="swatch-dot" role="button" tabindex="0" data-color="emerald" style="--sw:#38e2c6;" title="Emerald"></div>
+            <div class="swatch-dot" role="button" tabindex="0" data-color="violet" style="--sw:#a855f7;" title="Violet"></div>
+            <div class="swatch-dot" role="button" tabindex="0" data-color="rose" style="--sw:#fb7185;" title="Rose"></div>
+            <div class="swatch-dot" role="button" tabindex="0" data-color="amber" style="--sw:#fbbf24;" title="Amber"></div>
+          </div>
+        </div>
+
+        <div id="saveItemEditBtn" class="pill-btn primary-pill" role="button" tabindex="0">Save File Changes</div>
       </div>
 
       <div id="decryptPrompt" class="decrypt-box hidden">
         <div class="lock-emblem">🔒</div>
-        <p>Encrypted with client-side AES-GCM 256.</p>
+        <p>This entry is protected with a passphrase.</p>
         <div class="input-well">
-          <input id="decryptInput" type="password" placeholder="Enter decryption passphrase" />
+          <input id="decryptInput" type="password" placeholder="Enter passphrase to unlock" />
         </div>
-        <div id="unlockItemBtn" class="pill-btn primary-pill" role="button" tabindex="0">Decrypt Content</div>
+        <div id="unlockItemBtn" class="pill-btn primary-pill" role="button" tabindex="0">Unlock</div>
       </div>
 
       <div id="previewViewport" class="preview-viewport"></div>
+    </div>
+  </div>
+
+  <!-- ACCOUNT CUSTOMIZATION & FULL CONTROL MODAL -->
+  <div id="accountModal" class="modal-backdrop hidden">
+    <div class="silk-card modal-card">
+      <div class="modal-head">
+        <h3>Account & Preferences</h3>
+        <div id="closeAccountBtn" class="icon-pill" role="button" tabindex="0">✕</div>
+      </div>
+
+      <div class="capsule-tabs">
+        <div class="capsule-tab active" role="button" tabindex="0" data-acc-tab="profile">Profile & Theme</div>
+        <div class="capsule-tab" role="button" tabindex="0" data-acc-tab="storage">Storage & Data</div>
+        <div class="capsule-tab" role="button" tabindex="0" data-acc-tab="security">Security</div>
+      </div>
+
+      <!-- TAB 1: PROFILE & THEME -->
+      <div id="accPaneProfile" class="create-pane">
+        <div class="profile-hero">
+          <div class="profile-avatar-lg">
+            <img id="accAvatarPreview" class="avatar-img hidden" alt="Avatar" />
+            <span id="accAvatarInitial">T</span>
+          </div>
+          <div class="profile-avatar-btns">
+            <label for="avatarFileInput" class="pill-btn glass-pill compact-pill">Change Photo</label>
+            <input id="avatarFileInput" type="file" accept="image/*" class="hidden" />
+            <div id="removeAvatarBtn" class="pill-btn glass-pill compact-pill" role="button" tabindex="0">Remove</div>
+          </div>
+        </div>
+
+        <div class="input-well">
+          <label for="accDisplayName">Display Name</label>
+          <input id="accDisplayName" type="text" placeholder="Your display name" />
+        </div>
+
+        <div class="input-well">
+          <label for="accBio">Personal Tagline / Bio</label>
+          <input id="accBio" type="text" placeholder="e.g. Personal cloud archive" />
+        </div>
+
+        <div class="input-well">
+          <label>Interface Accent Theme</label>
+          <div id="themePicker" class="swatch-row">
+            <div class="swatch-dot active" role="button" tabindex="0" data-theme="indigo" style="--sw:#6c8cff;" title="Indigo"></div>
+            <div class="swatch-dot" role="button" tabindex="0" data-theme="emerald" style="--sw:#38e2c6;" title="Emerald"></div>
+            <div class="swatch-dot" role="button" tabindex="0" data-theme="violet" style="--sw:#a855f7;" title="Violet"></div>
+            <div class="swatch-dot" role="button" tabindex="0" data-theme="rose" style="--sw:#fb7185;" title="Rose"></div>
+            <div class="swatch-dot" role="button" tabindex="0" data-theme="amber" style="--sw:#fbbf24;" title="Amber"></div>
+          </div>
+        </div>
+
+        <div id="saveProfileBtn" class="pill-btn primary-pill" role="button" tabindex="0">Save Profile</div>
+      </div>
+
+      <!-- TAB 2: STORAGE & DATA CONTROL -->
+      <div id="accPaneStorage" class="create-pane hidden">
+        <div class="storage-summary-card">
+          <div class="storage-big-row">
+            <div>
+              <div class="storage-label">Total Stored Volume</div>
+              <div id="accTotalSize" class="storage-value">0 B</div>
+            </div>
+            <div class="unlimited-badge">∞ UNLIMITED</div>
+          </div>
+          <div id="accBreakdownGrid" class="breakdown-grid"></div>
+        </div>
+
+        <div id="exportDataBtn" class="pill-btn glass-pill" role="button" tabindex="0">Download Full Vault Index (JSON)</div>
+        <div id="purgeVaultBtn" class="pill-btn glass-pill danger-pill" role="button" tabindex="0">Delete All Stored Items</div>
+      </div>
+
+      <!-- TAB 3: SECURITY & ACCOUNT OWNERSHIP -->
+      <div id="accPaneSecurity" class="create-pane hidden">
+        <div class="input-well">
+          <label for="secOldPass">Current Password</label>
+          <input id="secOldPass" type="password" placeholder="••••••••" />
+        </div>
+        <div class="input-well">
+          <label for="secNewPass">New Password</label>
+          <input id="secNewPass" type="password" placeholder="••••••••" />
+        </div>
+        <div class="input-well">
+          <label for="secConfirmPass">Confirm New Password</label>
+          <input id="secConfirmPass" type="password" placeholder="••••••••" />
+        </div>
+        <div id="changePassBtn" class="pill-btn primary-pill" role="button" tabindex="0">Update Password</div>
+
+        <div class="danger-zone-box">
+          <div class="muted-sub">Permanently erase your account and all stored files.</div>
+          <div id="deleteAccountBtn" class="pill-btn glass-pill danger-pill" role="button" tabindex="0">Delete Account Permanently</div>
+        </div>
+      </div>
     </div>
   </div>
 
