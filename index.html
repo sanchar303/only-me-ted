@@ -20,9 +20,39 @@
     <div class="orb orb-3"></div>
   </div>
 
+  <!-- STANDALONE DROP LINK VIEWER (PUBLIC OR AUTHENTICATED SECURE SHARE) -->
+  <main id="dropViewerView" class="viewport-shell auth-shell hidden">
+    <section class="silk-card drop-viewer-card">
+      <div class="modal-head">
+        <div class="preview-title-wrap">
+          <div id="dropViewerBadge" class="brand-badge" style="display:inline-block; margin-bottom:6px;">🌐 PUBLIC DROP LINK</div>
+          <h2 id="dropViewerTitle" style="font-size:18px;">Shared Item</h2>
+          <span id="dropViewerMeta" class="preview-sub">Loading shared payload...</span>
+        </div>
+        <div id="dropGoAppBtn" class="pill-btn glass-pill compact-pill" role="button" tabindex="0">Open App</div>
+      </div>
+
+      <div id="dropViewerViewport" class="preview-viewport">
+        <div class="muted-sub">Connecting to cloud vault...</div>
+      </div>
+
+      <div id="dropViewerActions" class="drop-viewer-actions">
+        <div id="dropDownloadBtn" class="pill-btn primary-pill" role="button" tabindex="0" style="flex:1;">↓ Download</div>
+        <div id="dropSaveVaultBtn" class="pill-btn glass-pill" role="button" tabindex="0" style="flex:1;">＋ Save to My Vault</div>
+      </div>
+
+      <footer class="micro-footer">© 2026 Sanchar Koirala | All rights reserved</footer>
+    </section>
+  </main>
+
   <!-- AUTH GATE -->
   <main id="authView" class="viewport-shell auth-shell">
     <section class="silk-card auth-card">
+      <div id="authDropNotice" class="secure-drop-banner hidden">
+        <span>🔐</span>
+        <span id="authDropNoticeText">Secure Drop Link — Sign in or create an account to view this item.</span>
+      </div>
+
       <div class="brand-header">
         <img src="favicon.png" alt="Only Me Ted" class="brand-logo" onerror="this.style.display='none'" />
         <div class="badge-cluster">
@@ -86,7 +116,7 @@
       </div>
 
       <div class="top-actions">
-        <div id="chatHubBtn" class="icon-pill badge-host" role="button" tabindex="0" title="Messages & People">
+        <div id="chatHubBtn" class="icon-pill badge-host" role="button" tabindex="0" title="Chats, Group Vaults & People">
           <span>💬</span>
           <span id="unreadTotalBadge" class="unread-badge hidden">0</span>
         </div>
@@ -114,7 +144,7 @@
         <div class="filter-chip" role="button" tabindex="0" data-filter="locked">Encrypted</div>
       </div>
 
-      <div id="folderBar" class="filter-scroller folder-scroller hidden"></div>
+      <div id="folderBar" class="filter-scroller folder-scroller"></div>
     </section>
 
     <!-- VAULT STAGE -->
@@ -140,7 +170,7 @@
       <div id="emptyState" class="empty-state hidden">
         <div class="empty-orb">∞</div>
         <h2>Your Infinite Vault is Ready</h2>
-        <p>Drop any file, paste from your clipboard, or tap <strong>＋ Upload</strong> below.</p>
+        <p>Create folders, drop any file, paste from your clipboard, or tap <strong>＋ Upload</strong> below.</p>
       </div>
 
       <div id="vaultGrid" class="vault-grid"></div>
@@ -153,6 +183,9 @@
       <div id="openUploadBtn" class="dock-btn primary-pill" role="button" tabindex="0">
         <span>＋ Upload</span>
       </div>
+      <div id="quickFolderBtn" class="dock-btn glass-pill" role="button" tabindex="0">
+        <span>📂 Folder</span>
+      </div>
       <div id="quickNoteBtn" class="dock-btn glass-pill" role="button" tabindex="0">
         <span>✎ Note</span>
       </div>
@@ -160,10 +193,38 @@
         <span>⛓ Link</span>
       </div>
       <div id="dockChatBtn" class="dock-btn glass-pill badge-host" role="button" tabindex="0">
-        <span>💬 Chat</span>
+        <span>💬 Social</span>
         <span id="dockUnreadBadge" class="unread-badge hidden">0</span>
       </div>
     </nav>
+  </div>
+
+  <!-- CREATE FOLDER MODAL -->
+  <div id="folderModal" class="modal-backdrop hidden">
+    <div class="silk-card modal-card" style="max-width:420px;">
+      <div class="modal-head">
+        <h3>Create Folder</h3>
+        <div id="closeFolderBtn" class="icon-pill" role="button" tabindex="0">✕</div>
+      </div>
+
+      <div class="input-well">
+        <label for="newFolderNameInput">Folder Name</label>
+        <input id="newFolderNameInput" type="text" placeholder="e.g. Work, Projects, Media, Receipts" />
+      </div>
+
+      <div class="input-well">
+        <label>Folder Accent</label>
+        <div id="folderColorPicker" class="swatch-row">
+          <div class="swatch-dot active" role="button" tabindex="0" data-fcolor="indigo" style="--sw:#6c8cff;" title="Indigo"></div>
+          <div class="swatch-dot" role="button" tabindex="0" data-fcolor="emerald" style="--sw:#38e2c6;" title="Emerald"></div>
+          <div class="swatch-dot" role="button" tabindex="0" data-fcolor="violet" style="--sw:#a855f7;" title="Violet"></div>
+          <div class="swatch-dot" role="button" tabindex="0" data-fcolor="rose" style="--sw:#fb7185;" title="Rose"></div>
+          <div class="swatch-dot" role="button" tabindex="0" data-fcolor="amber" style="--sw:#fbbf24;" title="Amber"></div>
+        </div>
+      </div>
+
+      <div id="createFolderSubmitBtn" class="pill-btn primary-pill" role="button" tabindex="0">Create Folder</div>
+    </div>
   </div>
 
   <!-- CREATE / STORE MODAL -->
@@ -225,8 +286,11 @@
 
       <div class="two-col-inputs">
         <div class="input-well">
-          <label for="itemFolder">Folder</label>
-          <input id="itemFolder" type="text" placeholder="General" />
+          <div style="display:flex; justify-content:space-between; align-items:center; padding-right:8px;">
+            <label for="itemFolderSelect">Destination Folder</label>
+            <span id="quickNewFolderInlineBtn" class="inline-link-action" role="button" tabindex="0">＋ New</span>
+          </div>
+          <select id="itemFolderSelect" class="silk-select"></select>
         </div>
         <div class="input-well">
           <label for="itemTags">Tags</label>
@@ -245,6 +309,7 @@
           <span id="previewMeta" class="preview-sub"></span>
         </div>
         <div class="preview-actions">
+          <div id="previewDropLinkBtn" class="icon-pill" role="button" tabindex="0" title="Create Public / Secure Drop Link">🔗</div>
           <div id="previewShareBtn" class="icon-pill" role="button" tabindex="0" title="Send in Direct Message">↗</div>
           <div id="previewPinBtn" class="icon-pill" role="button" tabindex="0" title="Pin to Top">★</div>
           <div id="previewEditBtn" class="icon-pill" role="button" tabindex="0" title="Customize File">✎</div>
@@ -263,8 +328,8 @@
             <input id="editItemTitle" type="text" />
           </div>
           <div class="input-well">
-            <label for="editItemFolder">Folder</label>
-            <input id="editItemFolder" type="text" placeholder="General" />
+            <label for="editItemFolderSelect">Move to Folder</label>
+            <select id="editItemFolderSelect" class="silk-select"></select>
           </div>
         </div>
 
@@ -311,14 +376,62 @@
     </div>
   </div>
 
-  <!-- SOCIAL DIRECT MESSAGES & PEOPLE DIRECTORY MODAL -->
+  <!-- DROP LINK GENERATOR MODAL (PUBLIC VS SECURE + OPTIONAL EXPIRY) -->
+  <div id="dropLinkModal" class="modal-backdrop hidden">
+    <div class="silk-card modal-card" style="max-width:460px;">
+      <div class="modal-head">
+        <div class="preview-title-wrap">
+          <h3>Share Drop Link</h3>
+          <span id="dropTargetTitle" class="preview-sub">Item</span>
+        </div>
+        <div id="closeDropLinkBtn" class="icon-pill" role="button" tabindex="0">✕</div>
+      </div>
+
+      <div class="input-well">
+        <label>Access Permission</label>
+        <div class="capsule-tabs">
+          <div id="dropModePublicBtn" class="capsule-tab active" role="button" tabindex="0" data-drop-mode="public">🌐 Public Share</div>
+          <div id="dropModeSecureBtn" class="capsule-tab" role="button" tabindex="0" data-drop-mode="secure">🔐 Secure Share</div>
+        </div>
+        <div id="dropModeHint" class="muted-sub" style="padding:4px 10px 0; font-size:12px;">
+          Anyone with this link can view & download immediately — no account needed.
+        </div>
+      </div>
+
+      <div class="input-well">
+        <label>Link Expiration</label>
+        <div id="dropExpiryRow" class="capsule-tabs">
+          <div class="capsule-tab active" role="button" tabindex="0" data-expiry="0">Never</div>
+          <div class="capsule-tab" role="button" tabindex="0" data-expiry="3600000">1 Hour</div>
+          <div class="capsule-tab" role="button" tabindex="0" data-expiry="86400000">24 Hours</div>
+          <div class="capsule-tab" role="button" tabindex="0" data-expiry="604800000">7 Days</div>
+        </div>
+      </div>
+
+      <div id="generateDropLinkBtn" class="pill-btn primary-pill" role="button" tabindex="0">Generate & Copy Link</div>
+
+      <div id="dropResultBox" class="storage-summary-card hidden">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+          <span class="storage-label">Active Share URL</span>
+          <span id="dropActiveStatus" class="mini-tag lock">PUBLIC</span>
+        </div>
+        <input id="dropGeneratedUrl" type="text" readonly class="url-copy-box" />
+        <div style="display:flex; gap:8px;">
+          <div id="copyDropUrlBtn" class="pill-btn glass-pill compact-pill" role="button" tabindex="0" style="flex:1;">⧉ Copy URL</div>
+          <div id="revokeDropLinkBtn" class="pill-btn glass-pill danger-pill compact-pill" role="button" tabindex="0">Revoke</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- SOCIAL: DIRECT MESSAGES, GROUP VAULT ROOMS & PEOPLE DIRECTORY MODAL -->
   <div id="socialModal" class="modal-backdrop hidden">
     <div class="silk-card modal-card social-card">
-      <!-- HUB VIEW (CHATS + DIRECTORY) -->
+      <!-- HUB VIEW -->
       <div id="socialHubView" class="social-pane">
         <div class="modal-head">
           <div>
-            <h3>Messages & Community</h3>
+            <h3>Social & Shared Vaults</h3>
             <span id="socialMemberSubtitle" class="preview-sub">0 registered vaults</span>
           </div>
           <div id="closeSocialBtn" class="icon-pill" role="button" tabindex="0">✕</div>
@@ -326,19 +439,67 @@
 
         <div class="capsule-tabs">
           <div id="tabSocialChats" class="capsule-tab active" role="button" tabindex="0" data-social-tab="chats">Direct Chats</div>
+          <div id="tabSocialGroups" class="capsule-tab" role="button" tabindex="0" data-social-tab="groups">Group Vaults</div>
           <div id="tabSocialPeople" class="capsule-tab" role="button" tabindex="0" data-social-tab="people">All People</div>
         </div>
 
         <div class="search-well compact-search">
           <span class="search-glyph">⌕</span>
-          <input id="socialSearchInput" type="search" placeholder="Search people by name or @username..." />
+          <input id="socialSearchInput" type="search" placeholder="Search chats, group rooms, or people..." />
         </div>
 
         <div id="inboxListPane" class="social-list"></div>
+
+        <div id="groupsListPane" class="social-list hidden">
+          <div id="openCreateGroupBtn" class="pill-btn primary-pill compact-pill" role="button" tabindex="0">
+            ＋ Create Shared Group Vault
+          </div>
+          <div id="groupVaultList" style="display:flex; flex-direction:column; gap:8px;"></div>
+        </div>
+
         <div id="peopleListPane" class="social-list hidden"></div>
       </div>
 
-      <!-- ACTIVE CONVERSATION THREAD VIEW -->
+      <!-- CREATE GROUP VAULT VIEW -->
+      <div id="createGroupView" class="social-pane hidden">
+        <div class="modal-head">
+          <div class="thread-peer-left">
+            <div id="backFromCreateGroupBtn" class="icon-pill" role="button" tabindex="0">←</div>
+            <h3>New Shared Group Vault</h3>
+          </div>
+          <div id="closeCreateGroupBtn" class="icon-pill" role="button" tabindex="0">✕</div>
+        </div>
+
+        <div class="input-well">
+          <label for="newGroupNameInput">Group Room Name</label>
+          <input id="newGroupNameInput" type="text" placeholder="e.g. Project Alpha, Family Cloud, Media Dump" />
+        </div>
+
+        <div class="input-well">
+          <label for="newGroupDescInput">Topic / Purpose (Optional)</label>
+          <input id="newGroupDescInput" type="text" placeholder="Shared folder & group chat" />
+        </div>
+
+        <div class="input-well">
+          <label>Room Accent</label>
+          <div id="groupColorPicker" class="swatch-row">
+            <div class="swatch-dot active" role="button" tabindex="0" data-gcolor="indigo" style="--sw:#6c8cff;"></div>
+            <div class="swatch-dot" role="button" tabindex="0" data-gcolor="emerald" style="--sw:#38e2c6;"></div>
+            <div class="swatch-dot" role="button" tabindex="0" data-gcolor="violet" style="--sw:#a855f7;"></div>
+            <div class="swatch-dot" role="button" tabindex="0" data-gcolor="rose" style="--sw:#fb7185;"></div>
+            <div class="swatch-dot" role="button" tabindex="0" data-gcolor="amber" style="--sw:#fbbf24;"></div>
+          </div>
+        </div>
+
+        <div class="input-well" style="flex:1; min-height:0;">
+          <label>Select Members to Add</label>
+          <div id="groupMemberChecklist" class="social-list"></div>
+        </div>
+
+        <div id="submitCreateGroupBtn" class="pill-btn primary-pill" role="button" tabindex="0">Create Group Vault Room</div>
+      </div>
+
+      <!-- ACTIVE 1-ON-1 CONVERSATION THREAD VIEW -->
       <div id="chatThreadView" class="social-pane thread-pane hidden">
         <div class="modal-head thread-head">
           <div class="thread-peer-left">
@@ -357,7 +518,6 @@
 
         <div id="chatMessagesStream" class="chat-stream"></div>
 
-        <!-- REPLY QUOTE BAR -->
         <div id="replyQuoteBar" class="reply-bar hidden">
           <div class="reply-bar-text">
             <strong id="replyQuoteAuthor">Replying</strong>
@@ -366,22 +526,106 @@
           <div id="cancelReplyBtn" class="clear-x" role="button" tabindex="0">✕</div>
         </div>
 
-        <!-- VAULT FILE PICKER DRAWER INSIDE CHAT -->
         <div id="chatVaultPicker" class="vault-picker-drawer hidden">
           <div class="picker-head">
-            <span>Select a file, note, or link from your vault to share</span>
+            <span>Select a file, note, or link from your vault</span>
             <div id="closeVaultPickerBtn" class="clear-x" role="button" tabindex="0">✕</div>
           </div>
           <div id="vaultPickerList" class="picker-list"></div>
         </div>
 
-        <!-- CHAT COMPOSER -->
         <div class="chat-composer">
           <div id="attachVaultBtn" class="icon-pill" role="button" tabindex="0" title="Share from My Vault">📁</div>
           <label for="chatDirectFileInput" class="icon-pill" title="Upload & Send File">＋</label>
           <input id="chatDirectFileInput" type="file" class="hidden" />
           <input id="chatMessageInput" type="text" placeholder="Write a message..." autocomplete="off" />
           <div id="sendChatBtn" class="icon-pill primary-send-pill" role="button" tabindex="0" title="Send">➤</div>
+        </div>
+      </div>
+
+      <!-- ACTIVE SHARED GROUP VAULT ROOM VIEW -->
+      <div id="groupRoomView" class="social-pane thread-pane hidden">
+        <div class="modal-head thread-head">
+          <div class="thread-peer-left">
+            <div id="backFromGroupBtn" class="icon-pill" role="button" tabindex="0" title="Back">←</div>
+            <div id="groupRoomBadge" class="avatar-trigger small-avatar">👥</div>
+            <div class="preview-title-wrap">
+              <h3 id="groupRoomTitle">Group Vault</h3>
+              <span id="groupRoomSub" class="preview-sub">0 members</span>
+            </div>
+          </div>
+          <div style="display:flex; gap:6px;">
+            <div id="groupMembersBtn" class="icon-pill" role="button" tabindex="0" title="Members & Invite">👥</div>
+            <div id="closeGroupRoomBtn" class="icon-pill" role="button" tabindex="0" title="Close">✕</div>
+          </div>
+        </div>
+
+        <!-- GROUP MEMBERS DRAWER -->
+        <div id="groupMembersDrawer" class="edit-drawer hidden">
+          <div class="picker-head">
+            <span>Room Members</span>
+          </div>
+          <div id="groupMembersList" class="filter-scroller"></div>
+          <div style="display:flex; gap:8px; align-items:center;">
+            <select id="groupAddMemberSelect" class="silk-select" style="flex:1;"></select>
+            <div id="groupAddMemberBtn" class="pill-btn primary-pill compact-pill" role="button" tabindex="0">＋ Add</div>
+          </div>
+        </div>
+
+        <!-- GROUP SUB-TABS: CHAT VS SHARED FOLDER -->
+        <div class="capsule-tabs">
+          <div id="tabGroupChat" class="capsule-tab active" role="button" tabindex="0" data-groom-tab="chat">💬 Group Chat</div>
+          <div id="tabGroupFolder" class="capsule-tab" role="button" tabindex="0" data-groom-tab="folder">📂 Shared Folder</div>
+        </div>
+
+        <!-- SUB-PANE A: GROUP CHAT -->
+        <div id="groupChatPane" class="social-pane" style="flex:1; min-height:0;">
+          <div id="groupMessagesStream" class="chat-stream"></div>
+
+          <div id="groupReplyBar" class="reply-bar hidden">
+            <div class="reply-bar-text">
+              <strong id="groupReplyAuthor">Replying</strong>
+              <span id="groupReplySnippet"></span>
+            </div>
+            <div id="cancelGroupReplyBtn" class="clear-x" role="button" tabindex="0">✕</div>
+          </div>
+
+          <div id="groupVaultPicker" class="vault-picker-drawer hidden">
+            <div class="picker-head">
+              <span>Share from your vault into this group folder</span>
+              <div id="closeGroupVaultPickerBtn" class="clear-x" role="button" tabindex="0">✕</div>
+            </div>
+            <div id="groupVaultPickerList" class="picker-list"></div>
+          </div>
+
+          <div class="chat-composer">
+            <div id="groupAttachVaultBtn" class="icon-pill" role="button" tabindex="0" title="Share from My Vault">📁</div>
+            <label for="groupDirectFileInput" class="icon-pill" title="Upload File to Group">＋</label>
+            <input id="groupDirectFileInput" type="file" class="hidden" />
+            <input id="groupMessageInput" type="text" placeholder="Message group..." autocomplete="off" />
+            <div id="sendGroupChatBtn" class="icon-pill primary-send-pill" role="button" tabindex="0" title="Send">➤</div>
+          </div>
+        </div>
+
+        <!-- SUB-PANE B: SHARED GROUP FOLDER -->
+        <div id="groupFolderPane" class="social-pane hidden" style="flex:1; min-height:0;">
+          <div style="display:flex; gap:8px;">
+            <label for="groupFolderUploadInput" class="pill-btn primary-pill compact-pill" style="flex:1;">＋ Upload File to Group</label>
+            <input id="groupFolderUploadInput" type="file" multiple class="hidden" />
+            <div id="groupToggleNoteBtn" class="pill-btn glass-pill compact-pill" role="button" tabindex="0">✎ Shared Note</div>
+          </div>
+
+          <div id="groupQuickNoteBox" class="edit-drawer hidden">
+            <div class="input-well">
+              <input id="groupNoteTitleInput" type="text" placeholder="Shared note title..." />
+            </div>
+            <div class="input-well">
+              <textarea id="groupNoteBodyInput" rows="3" placeholder="Write shared note for everyone in this room..."></textarea>
+            </div>
+            <div id="groupSaveNoteBtn" class="pill-btn primary-pill compact-pill" role="button" tabindex="0">Post Note to Folder</div>
+          </div>
+
+          <div id="groupItemsGrid" class="social-list"></div>
         </div>
       </div>
     </div>

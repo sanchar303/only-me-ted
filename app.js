@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  // PRIVATE CLOUD ENDPOINTS (FIXED & HIDDEN FROM USER INTERFACE)
+  // PRIVATE CLOUD ENDPOINTS
   const INDEX_BASE = 'https://cloud-db-studio-default-rtdb.firebaseio.com/onlymeted';
   const STORAGE_RELAY = 'https://only-me-ted.koirala57111.workers.dev';
   const STORAGE_CHANNEL = '-1003795582178';
@@ -9,7 +9,7 @@
 
   const SHARD_BYTES = 18 * 1024 * 1024;
   const PARALLEL_STREAMS = 3;
-  const SESSION_KEY = 'onlymeted_session_v4';
+  const SESSION_KEY = 'onlymeted_session_v5';
 
   const ACCENT_THEMES = {
     indigo: { a1: '#6c8cff', a2: '#38e2c6' },
@@ -24,22 +24,51 @@
   let currentUser = null;
   let authMode = 'login';
   let itemsMap = {};
+  let foldersMap = {};
   let directoryMap = {};
   let inboxMap = {};
+  let userGroupsMap = {};
+
   let activeFilter = 'all';
   let activeFolder = 'all';
   let searchQuery = '';
   let socialSearch = '';
   let activeSocialTab = 'chats';
+
+  // 1-on-1 DM state
   let activePeer = null;
   let activeRoomId = null;
   let threadMessages = {};
   let pendingReply = null;
   let pendingShareItem = null;
 
+  // Group Vault Room state
+  let activeGroupMeta = null;
+  let activeGroupId = null;
+  let groupMessages = {};
+  let groupItems = {};
+  let pendingGroupReply = null;
+  let selectedGroupMembers = new Set();
+  let selectedGroupColor = 'indigo';
+  let selectedFolderColor = 'indigo';
+
+  // Drop Link state
+  let pendingDropId = new URLSearchParams(window.location.search).get('share');
+  let activeDropRecord = null;
+  let activeDropObjectUrl = null;
+  let dropTargetItem = null;
+  let selectedDropMode = 'public';
+  let selectedDropExpiryMs = 0;
+  let currentActiveDropId = null;
+
+  // Live SSE Streams
   let inboxEventSource = null;
   let threadEventSource = null;
+  let userGroupsEventSource = null;
+  let groupMsgEventSource = null;
+  let groupItemsEventSource = null;
 
+  // Item Preview & Customization state
   let activeItem = null;
   let activeObjectUrl = null;
   let activePlainText = '';
@@ -100,8 +129,9 @@
     return raw.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '');
   }
 
-  function generateId() {
-    return `${Date.now().toString(36)}_${crypto.getRandomValues(new Uint32Array(1))[0].toString(36)}`;
+  function generateId(prefix = '') {
+    const core = `${Date.now().toString(36)}_${crypto.getRandomValues(new Uint32Array(1))[0].toString(36)}`;
+    return prefix ? `${prefix}_${core}` : core;
   }
 
   function getRoomId(userA, userB) {
@@ -304,7 +334,7 @@
     return new Response(ds.readable).arrayBuffer();
   }
 
-  // SILENT CLOUD BLOB RELAY & HUMAN-READABLE TELEGRAM CHAT LOGGER
+  // CLOUD BLOB RELAY & TELEGRAM CHAT LOGGER
   function relayHeaders() {
     return {
       'X-TG-Token': STORAGE_KEY,
@@ -374,7 +404,8 @@
       const end = Math.min(totalBytes, start + SHARD_BYTES);
       const slice = new Blob([buffer.slice(start, end)], { type: 'application/octet-stream' });
       const shardName = `${itemId}_p${idx + 1}.dat`;
-      const caption = `${currentUser.displayName || currentUser.handle} (@${currentUser.key}) • ${label} [${idx + 1}/${totalShards}]`;
+      const ownerTag = currentUser ? `${currentUser.displayName || currentUser.handle} (@${currentUser.key})` : 'Guest';
+      const caption = `${ownerTag} • ${label} [${idx + 1}/${totalShards}]`;
 
       setTransferProgress(
         true,
@@ -395,8 +426,9 @@
     };
   }
 
-  async function downloadBufferFromCloud(meta) {
-    const cacheKey = `${currentUser.key}:${meta.id}`;
+  async function downloadBufferFromCloud(meta, showGlobalBanner = true) {
+    const cacheScope = currentUser ? currentUser.key : 'public_drop';
+    const cacheKey = `${cacheScope}:${meta.id}`;
     const cached = await edgeCache.get(cacheKey);
     if (cached) return cached;
 
@@ -405,7 +437,7 @@
 
     let completed = 0;
     const buffers = new Array(shards.length);
-    setTransferProgress(true, `Loading ${meta.title}...`, 8);
+    if (showGlobalBanner) setTransferProgress(true, `Loading ${meta.title}...`, 8);
 
     let cursor = 0;
     const workers = Array.from({ length: Math.min(PARALLEL_STREAMS, shards.length) }, async () => {
@@ -419,18 +451,20 @@
         if (!res.ok) throw new Error('Unable to retrieve file stream');
         buffers[idx] = await res.arrayBuffer();
         completed++;
-        setTransferProgress(
-          true,
-          `Retrieving (${completed}/${shards.length})...`,
-          10 + (completed / shards.length) * 85
-        );
+        if (showGlobalBanner) {
+          setTransferProgress(
+            true,
+            `Retrieving (${completed}/${shards.length})...`,
+            10 + (completed / shards.length) * 85
+          );
+        }
       }
     });
     await Promise.all(workers);
 
     const joined = await new Blob(buffers).arrayBuffer();
     const rawBuf = await decompressBuffer(joined, meta.compressed);
-    setTransferProgress(false);
+    if (showGlobalBanner) setTransferProgress(false);
 
     await edgeCache.set(cacheKey, rawBuf);
     return rawBuf;
@@ -519,6 +553,142 @@
       $('headerAvatarInitial').classList.remove('hidden');
     }
     applyTheme(currentUser.theme || 'indigo');
+  }
+
+  // DROP LINK RESOLUTION (PUBLIC & SECURE LINKS WITH EXPIRY)
+  function clearShareUrlParam() {
+    if (window.location.search.includes('share=')) {
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+    pendingDropId = null;
+  }
+
+  async function resolveIncomingDropLink(dropId) {
+    try {
+      const drop = await indexGet(`drops/${dropId}`);
+      if (!drop || !drop.item) {
+        showToast('This Drop Link does not exist or was revoked', 3800);
+        clearShareUrlParam();
+        return false;
+      }
+      if (drop.expiresAt && Date.now() > drop.expiresAt) {
+        showToast('This Drop Link has expired', 3800);
+        clearShareUrlParam();
+        return false;
+      }
+
+      if (drop.mode === 'secure' && !currentUser) {
+        $('authDropNoticeText').textContent =
+          `🔐 Secure Drop Link from ${drop.ownerName || drop.ownerKey} — Sign in or create an account to view & download "${drop.item.title}".`;
+        $('authDropNotice').classList.remove('hidden');
+        return false;
+      }
+
+      openStandaloneDropViewer(drop);
+      return true;
+    } catch {
+      showToast('Unable to open Drop Link right now');
+      return false;
+    }
+  }
+
+  async function openStandaloneDropViewer(drop) {
+    activeDropRecord = drop;
+    if (activeDropObjectUrl) {
+      URL.revokeObjectURL(activeDropObjectUrl);
+      activeDropObjectUrl = null;
+    }
+
+    $('authView').classList.add('hidden');
+    $('appView').classList.add('hidden');
+    $('dropViewerView').classList.remove('hidden');
+
+    const isPublic = drop.mode !== 'secure';
+    const expiryLabel = drop.expiresAt
+      ? ` • Expires ${new Date(drop.expiresAt).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}`
+      : ' • Permanent';
+
+    $('dropViewerBadge').textContent = isPublic ? '🌐 PUBLIC DROP LINK' : '🔐 SECURE ACCOUNT DROP';
+    $('dropViewerTitle').textContent = drop.item.title;
+    $('dropViewerMeta').textContent =
+      `Shared by ${drop.ownerName || drop.ownerKey} • ${formatBytes(drop.item.size || 0)}${expiryLabel}`;
+
+    const viewport = $('dropViewerViewport');
+    viewport.innerHTML = '<div class="muted-sub">Loading shared item from cloud...</div>';
+
+    try {
+      const item = drop.item;
+      if (item.kind === 'link') {
+        viewport.innerHTML = `
+          <div style="text-align:center; display:flex; flex-direction:column; gap:14px; width:100%;">
+            <div class="preview-text-box" style="text-align:center;">${escapeHtml(item.url)}</div>
+            <a href="${escapeHtml(item.url)}" target="_blank" rel="noopener noreferrer" class="pill-btn primary-pill" style="text-decoration:none; max-width:240px; margin:0 auto;">Open Link ↗</a>
+          </div>
+        `;
+        return;
+      }
+
+      const rawBuf = await downloadBufferFromCloud(item, false);
+      const mime = item.mime || 'application/octet-stream';
+      const blob = new Blob([rawBuf], { type: mime });
+      activeDropObjectUrl = URL.createObjectURL(blob);
+
+      if (item.kind === 'note' || mime.startsWith('text/') || mime.includes('json') || mime.includes('javascript')) {
+        const txt = new TextDecoder().decode(rawBuf);
+        viewport.innerHTML = `<div class="preview-text-box">${escapeHtml(txt)}</div>`;
+      } else if (mime.startsWith('image/')) {
+        viewport.innerHTML = `<img src="${activeDropObjectUrl}" alt="${escapeHtml(item.title)}" />`;
+      } else if (mime.startsWith('video/')) {
+        viewport.innerHTML = `<video src="${activeDropObjectUrl}" controls playsinline autoplay></video>`;
+      } else if (mime.startsWith('audio/')) {
+        viewport.innerHTML = `<audio src="${activeDropObjectUrl}" controls autoplay></audio>`;
+      } else if (mime.includes('pdf')) {
+        viewport.innerHTML = `<iframe src="${activeDropObjectUrl}" title="${escapeHtml(item.title)}"></iframe>`;
+      } else {
+        viewport.innerHTML = `
+          <div style="text-align:center; display:flex; flex-direction:column; gap:12px;">
+            <div style="font-size:40px;">📦</div>
+            <div style="font-weight:700;">${escapeHtml(item.title)}</div>
+            <div class="muted-sub">${formatBytes(item.size || 0)} • Ready to download</div>
+          </div>
+        `;
+      }
+    } catch (err) {
+      viewport.innerHTML = `<div class="muted-sub">Unable to load shared item: ${escapeHtml(err.message)}</div>`;
+    }
+  }
+
+  function downloadActiveDropItem() {
+    if (!activeDropRecord?.item) return;
+    const item = activeDropRecord.item;
+    if (item.kind === 'link') {
+      window.open(item.url, '_blank', 'noopener,noreferrer');
+      return;
+    }
+    if (!activeDropObjectUrl) {
+      showToast('Please wait for item to finish loading');
+      return;
+    }
+    const a = document.createElement('a');
+    a.href = activeDropObjectUrl;
+    a.download = item.kind === 'note' ? `${item.title}.txt` : item.title;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    showToast('Download started');
+  }
+
+  async function saveActiveDropToMyVault() {
+    if (!activeDropRecord?.item) return;
+    if (!currentUser) {
+      $('dropViewerView').classList.add('hidden');
+      $('authDropNoticeText').textContent =
+        `Sign in or create a free account to save "${activeDropRecord.item.title}" into your personal vault.`;
+      $('authDropNotice').classList.remove('hidden');
+      $('authView').classList.remove('hidden');
+      return;
+    }
+    await cloneSharedAttachmentToVault(activeDropRecord.item, 'Shared Drops');
   }
 
   // AUTHENTICATION FLOW
@@ -610,7 +780,12 @@
       }
 
       localStorage.setItem(SESSION_KEY, JSON.stringify({ key: currentUser.key, handle: currentUser.handle }));
+      $('authDropNotice').classList.add('hidden');
       enterWorkspace();
+
+      if (pendingDropId) {
+        await resolveIncomingDropLink(pendingDropId);
+      }
     } catch (err) {
       showToast(err.message || 'Unable to sign in');
       setAuthMode(authMode);
@@ -618,34 +793,47 @@
   }
 
   function enterWorkspace() {
+    $('dropViewerView').classList.add('hidden');
     $('authView').classList.add('hidden');
     $('appView').classList.remove('hidden');
     renderUserProfileHeader();
     syncVault(true);
     startInboxStream();
+    startUserGroupsStream();
   }
 
   function stopSocialStreams() {
-    if (inboxEventSource) {
-      inboxEventSource.close();
-      inboxEventSource = null;
-    }
-    if (threadEventSource) {
-      threadEventSource.close();
-      threadEventSource = null;
-    }
+    [
+      inboxEventSource,
+      threadEventSource,
+      userGroupsEventSource,
+      groupMsgEventSource,
+      groupItemsEventSource
+    ].forEach((es) => {
+      if (es) es.close();
+    });
+    inboxEventSource = null;
+    threadEventSource = null;
+    userGroupsEventSource = null;
+    groupMsgEventSource = null;
+    groupItemsEventSource = null;
   }
 
   function signOut() {
     stopSocialStreams();
     currentUser = null;
     itemsMap = {};
+    foldersMap = {};
     inboxMap = {};
+    userGroupsMap = {};
     activePeer = null;
     activeRoomId = null;
+    activeGroupId = null;
+    activeGroupMeta = null;
     localStorage.removeItem(SESSION_KEY);
     applyTheme('indigo');
     $('appView').classList.add('hidden');
+    $('dropViewerView').classList.add('hidden');
     $('authView').classList.remove('hidden');
     $('authPassword').value = '';
     setAuthMode('login');
@@ -653,16 +841,18 @@
     showToast('Signed out');
   }
 
-  // VAULT SYNC & RENDER
+  // FOLDERS & VAULT SYNC / RENDER
   async function syncVault(silent = false) {
     if (!currentUser) return;
     try {
-      const [metaData, profileData] = await Promise.all([
+      const [metaData, savedFolders, profileData] = await Promise.all([
         indexGet(`vault/${currentUser.key}/meta`),
+        indexGet(`vault/${currentUser.key}/folders`),
         indexGet(`users/${currentUser.key}`),
         refreshDirectory()
       ]);
       itemsMap = metaData || {};
+      foldersMap = savedFolders || {};
       if (profileData) {
         currentUser.displayName = profileData.displayName || currentUser.handle;
         currentUser.bio = profileData.bio || '';
@@ -676,6 +866,72 @@
       if (!silent) showToast('Vault & community synced');
     } catch {
       showToast('Could not refresh right now');
+    }
+  }
+
+  function getAllFolderNames() {
+    const names = new Set(['General']);
+    Object.values(foldersMap).forEach((f) => {
+      if (f && f.name) names.add(f.name.trim());
+    });
+    Object.values(itemsMap).forEach((it) => {
+      if (it && it.folder) names.add(it.folder.trim());
+    });
+    return Array.from(names).filter(Boolean).sort((a, b) => {
+      if (a === 'General') return -1;
+      if (b === 'General') return 1;
+      return a.localeCompare(b);
+    });
+  }
+
+  function populateFolderSelect(selectEl, preferredFolder = 'General') {
+    if (!selectEl) return;
+    const folders = getAllFolderNames();
+    selectEl.innerHTML = '';
+    folders.forEach((name) => {
+      const opt = document.createElement('option');
+      opt.value = name;
+      opt.textContent = `📂 ${name}`;
+      if (name === preferredFolder) opt.selected = true;
+      selectEl.appendChild(opt);
+    });
+  }
+
+  function openCreateFolderModal() {
+    $('newFolderNameInput').value = '';
+    selectedFolderColor = 'indigo';
+    document.querySelectorAll('#folderColorPicker .swatch-dot').forEach((d) => {
+      d.classList.toggle('active', d.dataset.fcolor === 'indigo');
+    });
+    $('folderModal').classList.remove('hidden');
+    setTimeout(() => $('newFolderNameInput').focus(), 60);
+  }
+
+  async function submitCreateFolder() {
+    if (!currentUser) return;
+    const raw = $('newFolderNameInput').value.trim().replace(/[.#$/[\]]/g, '');
+    if (!raw) {
+      showToast('Enter a folder name');
+      return;
+    }
+    const key = sanitizeKey(raw) || generateId('fld');
+    const folderObj = {
+      id: key,
+      name: raw,
+      color: selectedFolderColor,
+      createdAt: Date.now()
+    };
+    try {
+      await indexPut(`vault/${currentUser.key}/folders/${key}`, folderObj);
+      foldersMap[key] = folderObj;
+      activeFolder = raw;
+      $('folderModal').classList.add('hidden');
+      renderVault();
+      populateFolderSelect($('itemFolderSelect'), raw);
+      populateFolderSelect($('editItemFolderSelect'), raw);
+      showToast(`Folder "${raw}" created`);
+    } catch {
+      showToast('Could not create folder');
     }
   }
 
@@ -693,23 +949,13 @@
   }
 
   function renderFolderChips(allItems) {
-    const folders = Array.from(
-      new Set(allItems.map((it) => (it.folder || 'General').trim()).filter(Boolean))
-    ).sort();
-
+    const folders = getAllFolderNames();
     const bar = $('folderBar');
-    if (folders.length <= 1 && (folders[0] === 'General' || folders.length === 0)) {
-      bar.classList.add('hidden');
-      activeFolder = 'all';
-      return;
-    }
-
-    bar.classList.remove('hidden');
     bar.innerHTML = '';
 
     const allChip = document.createElement('div');
     allChip.className = `filter-chip folder-chip ${activeFolder === 'all' ? 'active' : ''}`;
-    allChip.textContent = 'All Folders';
+    allChip.textContent = `All Folders (${allItems.length})`;
     bindDivButton(allChip, () => {
       activeFolder = 'all';
       renderVault();
@@ -717,15 +963,22 @@
     bar.appendChild(allChip);
 
     folders.forEach((folder) => {
+      const count = allItems.filter((it) => (it.folder || 'General').trim() === folder).length;
       const chip = document.createElement('div');
       chip.className = `filter-chip folder-chip ${activeFolder === folder ? 'active' : ''}`;
-      chip.textContent = `📂 ${folder}`;
+      chip.textContent = `📂 ${folder} (${count})`;
       bindDivButton(chip, () => {
         activeFolder = folder;
         renderVault();
       });
       bar.appendChild(chip);
     });
+
+    const addChip = document.createElement('div');
+    addChip.className = 'filter-chip folder-chip new-folder-chip';
+    addChip.textContent = '＋ New Folder';
+    bindDivButton(addChip, openCreateFolderModal);
+    bar.appendChild(addChip);
   }
 
   function matchesFilter(item) {
@@ -789,7 +1042,7 @@
             <div class="item-badges-right">
               ${item.pinned ? '<span class="mini-tag pin">★</span>' : ''}
               ${item.encrypted ? '<span class="mini-tag lock">LOCKED</span>' : ''}
-              ${folderLabel && folderLabel !== 'General' ? `<span class="mini-tag folder">${escapeHtml(folderLabel)}</span>` : ''}
+              ${folderLabel && folderLabel !== 'General' ? `<span class="mini-tag folder">📂 ${escapeHtml(folderLabel)}</span>` : ''}
               ${tagsHtml}
             </div>
           </div>
@@ -807,7 +1060,103 @@
     });
   }
 
-  // REAL-TIME SOCIAL INBOX & DIRECT MESSAGING
+  // DROP LINK GENERATOR (PUBLIC VS SECURE + EXPIRY)
+  function openDropLinkModal(item) {
+    if (!item || !currentUser) return;
+    if (item.encrypted) {
+      showToast('Encrypted notes cannot be shared via Drop Link');
+      return;
+    }
+    dropTargetItem = item;
+    currentActiveDropId = null;
+    selectedDropMode = 'public';
+    selectedDropExpiryMs = 0;
+
+    $('dropTargetTitle').textContent = `${item.title} (${formatBytes(item.size || 0)})`;
+    $('dropModePublicBtn').classList.add('active');
+    $('dropModeSecureBtn').classList.remove('active');
+    $('dropModeHint').textContent = 'Anyone with this link can view & download immediately — no account needed.';
+    document.querySelectorAll('#dropExpiryRow .capsule-tab').forEach((t) => {
+      t.classList.toggle('active', t.dataset.expiry === '0');
+    });
+    $('dropResultBox').classList.add('hidden');
+    $('dropLinkModal').classList.remove('hidden');
+  }
+
+  async function generateDropLink() {
+    if (!dropTargetItem || !currentUser) return;
+    const dropId = generateId('drop');
+    const now = Date.now();
+    const expiresAt = selectedDropExpiryMs > 0 ? now + selectedDropExpiryMs : null;
+    const ownerName = currentUser.displayName || currentUser.handle;
+
+    // Mark source item as sharedRef so deleting it later preserves active Drop Links
+    if (!dropTargetItem.sharedRef && itemsMap[dropTargetItem.id]) {
+      itemsMap[dropTargetItem.id].sharedRef = true;
+      indexPatch(`vault/${currentUser.key}/meta/${dropTargetItem.id}`, { sharedRef: true }).catch(() => {});
+    }
+
+    const payload = {
+      id: dropId,
+      mode: selectedDropMode,
+      expiresAt,
+      createdAt: now,
+      ownerKey: currentUser.key,
+      ownerName,
+      item: {
+        id: dropTargetItem.id,
+        kind: dropTargetItem.kind,
+        title: dropTargetItem.title,
+        mime: dropTargetItem.mime || 'application/octet-stream',
+        size: dropTargetItem.size || 0,
+        compressed: Boolean(dropTargetItem.compressed),
+        shards: dropTargetItem.shards || dropTargetItem.tgShards || [],
+        url: dropTargetItem.url || ''
+      }
+    };
+
+    try {
+      await indexPut(`drops/${dropId}`, payload);
+      currentActiveDropId = dropId;
+      const shareUrl = `${window.location.origin}${window.location.pathname}?share=${encodeURIComponent(dropId)}`;
+
+      $('dropGeneratedUrl').value = shareUrl;
+      $('dropActiveStatus').textContent =
+        `${selectedDropMode === 'public' ? '🌐 PUBLIC' : '🔐 SECURE'}${expiresAt ? ' • EXPIRING' : ''}`;
+      $('dropResultBox').classList.remove('hidden');
+
+      try {
+        await navigator.clipboard.writeText(shareUrl);
+        showToast('Drop Link generated & copied!');
+      } catch {
+        showToast('Drop Link generated!');
+      }
+
+      const modeBadge = selectedDropMode === 'public' ? '🌐 Public Share (No Account Needed)' : '🔐 Secure Share (Account Required)';
+      const expText = expiresAt ? new Date(expiresAt).toLocaleString() : 'Never';
+      logActivityToChannel(
+        `🔗 <b>${escapeHtml(ownerName)}</b> created a Drop Link\n` +
+        `📄 <b>${escapeHtml(dropTargetItem.title)}</b> (${formatBytes(dropTargetItem.size || 0)})\n` +
+        `🛡 ${modeBadge} • Expires: <code>${escapeHtml(expText)}</code>`
+      );
+    } catch {
+      showToast('Could not generate Drop Link');
+    }
+  }
+
+  async function revokeActiveDropLink() {
+    if (!currentActiveDropId) return;
+    try {
+      await indexDelete(`drops/${currentActiveDropId}`);
+      currentActiveDropId = null;
+      $('dropResultBox').classList.add('hidden');
+      showToast('Drop Link revoked');
+    } catch {
+      showToast('Could not revoke link');
+    }
+  }
+
+  // REAL-TIME SSE PATCH HELPER
   function applySsePatch(targetObj, path, data) {
     if (path === '/' || !path) {
       Object.keys(targetObj).forEach((k) => delete targetObj[k]);
@@ -830,6 +1179,7 @@
     }
   }
 
+  // REAL-TIME 1-ON-1 DIRECT MESSAGING
   function startInboxStream() {
     if (!currentUser) return;
     if (inboxEventSource) inboxEventSource.close();
@@ -842,7 +1192,7 @@
         const packet = JSON.parse(e.data);
         applySsePatch(inboxMap, packet.path, packet.data);
         updateUnreadBadges();
-        if (!$('socialModal').classList.contains('hidden') && $('chatThreadView').classList.contains('hidden')) {
+        if (!$('socialModal').classList.contains('hidden') && !$('socialHubView').classList.contains('hidden')) {
           renderInboxList();
         }
       } catch {}
@@ -852,8 +1202,33 @@
     inboxEventSource.addEventListener('patch', handleEvent);
   }
 
+  function startUserGroupsStream() {
+    if (!currentUser) return;
+    if (userGroupsEventSource) userGroupsEventSource.close();
+
+    const url = `${INDEX_BASE}/userGroups/${currentUser.key}.json`;
+    userGroupsEventSource = new EventSource(url);
+
+    const handleEvent = (e) => {
+      try {
+        const packet = JSON.parse(e.data);
+        applySsePatch(userGroupsMap, packet.path, packet.data);
+        updateUnreadBadges();
+        if (!$('socialModal').classList.contains('hidden') && !$('socialHubView').classList.contains('hidden')) {
+          renderGroupVaultList();
+        }
+      } catch {}
+    };
+
+    userGroupsEventSource.addEventListener('put', handleEvent);
+    userGroupsEventSource.addEventListener('patch', handleEvent);
+  }
+
   function updateUnreadBadges() {
-    const totalUnread = Object.values(inboxMap).reduce((sum, conv) => sum + (Number(conv.unreadCount) || 0), 0);
+    const dmUnread = Object.values(inboxMap).reduce((sum, conv) => sum + (Number(conv.unreadCount) || 0), 0);
+    const grpUnread = Object.values(userGroupsMap).reduce((sum, g) => sum + (Number(g.unreadCount) || 0), 0);
+    const totalUnread = dmUnread + grpUnread;
+
     ['unreadTotalBadge', 'dockUnreadBadge'].forEach((id) => {
       const badge = $(id);
       if (totalUnread > 0) {
@@ -865,17 +1240,34 @@
     });
   }
 
-  function openSocialHub(tab = 'chats', preselectShareItem = null) {
-    pendingShareItem = preselectShareItem;
-    $('socialModal').classList.remove('hidden');
-    $('chatThreadView').classList.add('hidden');
-    $('socialHubView').classList.remove('hidden');
+  function closeSocialSubstreams() {
     if (threadEventSource) {
       threadEventSource.close();
       threadEventSource = null;
     }
+    if (groupMsgEventSource) {
+      groupMsgEventSource.close();
+      groupMsgEventSource = null;
+    }
+    if (groupItemsEventSource) {
+      groupItemsEventSource.close();
+      groupItemsEventSource = null;
+    }
+  }
+
+  function openSocialHub(tab = 'chats', preselectShareItem = null) {
+    pendingShareItem = preselectShareItem;
+    closeSocialSubstreams();
     activePeer = null;
     activeRoomId = null;
+    activeGroupId = null;
+    activeGroupMeta = null;
+
+    $('socialModal').classList.remove('hidden');
+    $('chatThreadView').classList.add('hidden');
+    $('createGroupView').classList.add('hidden');
+    $('groupRoomView').classList.add('hidden');
+    $('socialHubView').classList.remove('hidden');
 
     if (pendingShareItem) {
       showToast(`Choose a person to send "${pendingShareItem.title}"`);
@@ -889,10 +1281,15 @@
   function switchSocialTab(tab) {
     activeSocialTab = tab;
     $('tabSocialChats').classList.toggle('active', tab === 'chats');
+    $('tabSocialGroups').classList.toggle('active', tab === 'groups');
     $('tabSocialPeople').classList.toggle('active', tab === 'people');
+
     $('inboxListPane').classList.toggle('hidden', tab !== 'chats');
+    $('groupsListPane').classList.toggle('hidden', tab !== 'groups');
     $('peopleListPane').classList.toggle('hidden', tab !== 'people');
+
     if (tab === 'chats') renderInboxList();
+    else if (tab === 'groups') renderGroupVaultList();
     else renderPeopleDirectory();
   }
 
@@ -917,7 +1314,7 @@
       .sort((a, b) => (b.lastAt || 0) - (a.lastAt || 0));
 
     if (!convs.length) {
-      list.innerHTML = `<div class="empty-state"><p>No messages yet. Switch to <strong>All People</strong> to message anyone.</p></div>`;
+      list.innerHTML = `<div class="empty-state"><p>No direct messages yet. Switch to <strong>All People</strong> to message anyone.</p></div>`;
       return;
     }
 
@@ -1020,14 +1417,12 @@
       $('threadPeerInitial').classList.remove('hidden');
     }
 
-    // Clear unread count for this peer
     if (inboxMap[peer.key]?.unreadCount) {
       inboxMap[peer.key].unreadCount = 0;
       updateUnreadBadges();
       indexPatch(`inbox/${currentUser.key}/${peer.key}`, { unreadCount: 0 }).catch(() => {});
     }
 
-    // Start live stream for messages in this room
     if (threadEventSource) threadEventSource.close();
     const msgUrl = `${INDEX_BASE}/dms/${activeRoomId}/messages.json`;
     threadEventSource = new EventSource(msgUrl);
@@ -1048,7 +1443,6 @@
     threadEventSource.addEventListener('put', onMsgEvent);
     threadEventSource.addEventListener('patch', onMsgEvent);
 
-    // If user entered via "Share in DM" from a file preview, send that item immediately
     if (pendingShareItem) {
       const itemToShare = pendingShareItem;
       pendingShareItem = null;
@@ -1138,14 +1532,14 @@
     stream.scrollTop = stream.scrollHeight;
   }
 
-  async function cloneSharedAttachmentToVault(att) {
+  async function cloneSharedAttachmentToVault(att, targetFolder = 'Shared with Me') {
     if (!currentUser) return;
     try {
       const newId = generateId();
       const cloned = {
         ...att,
         id: newId,
-        folder: 'Shared with Me',
+        folder: targetFolder,
         pinned: false,
         sharedRef: true,
         createdAt: Date.now()
@@ -1153,7 +1547,7 @@
       await indexPut(`vault/${currentUser.key}/meta/${newId}`, cloned);
       itemsMap[newId] = cloned;
       renderVault();
-      showToast(`Saved "${att.title}" to your vault`);
+      showToast(`Saved "${att.title}" to ${targetFolder}`);
     } catch {
       showToast('Could not save item');
     }
@@ -1187,7 +1581,6 @@
       ? `📎 ${attachment.title}${cleanText ? `: ${cleanText}` : ''}`
       : cleanText;
 
-    // Optimistic local update
     threadMessages[msgId] = msgObj;
     renderThreadMessages();
 
@@ -1215,7 +1608,6 @@
         })
       ]);
 
-      // Human-readable live chat log in your Telegram channel
       let logHtml = `💬 <b>${escapeHtml(myName)}</b> ➔ <b>${escapeHtml(peerName)}</b>\n`;
       if (attachment) {
         logHtml += `📎 Shared <b>${escapeHtml(attachment.title)}</b> (${formatBytes(attachment.size || 0)})\n`;
@@ -1234,7 +1626,6 @@
       showToast('Encrypted notes cannot be shared directly');
       return;
     }
-    // Mark source item as sharedRef so deleting it later preserves the recipient's copy
     if (!item.sharedRef && itemsMap[item.id]) {
       itemsMap[item.id].sharedRef = true;
       indexPatch(`vault/${currentUser.key}/meta/${item.id}`, { sharedRef: true }).catch(() => {});
@@ -1346,7 +1737,668 @@
     drawer.classList.remove('hidden');
   }
 
-  // CREATE / STORE ACTIONS
+  // SHARED GROUP VAULT ROOMS (MULTI-PERSON FOLDERS + LIVE GROUP CHAT)
+  function renderGroupVaultList() {
+    const list = $('groupVaultList');
+    const q = socialSearch.toLowerCase();
+    const groups = Object.values(userGroupsMap)
+      .filter((g) => {
+        if (!q) return true;
+        return `${g.name || ''} ${g.lastText || ''}`.toLowerCase().includes(q);
+      })
+      .sort((a, b) => (b.lastAt || 0) - (a.lastAt || 0));
+
+    if (!groups.length) {
+      list.innerHTML = `<div class="empty-state"><p>No Shared Group Vaults yet. Tap <strong>＋ Create Shared Group Vault</strong> above to start a multi-person folder and group chat.</p></div>`;
+      return;
+    }
+
+    list.innerHTML = '';
+    groups.forEach((grp) => {
+      const row = document.createElement('div');
+      row.className = 'person-row';
+      row.setAttribute('role', 'button');
+      row.setAttribute('tabindex', '0');
+      const unread = Number(grp.unreadCount) || 0;
+
+      row.innerHTML = `
+        <div class="person-left">
+          <div class="avatar-trigger small-avatar">👥</div>
+          <div class="person-meta">
+            <div class="person-name-line">
+              <span>${escapeHtml(grp.name || 'Group Vault')}</span>
+              <span class="mini-tag folder">${grp.memberCount || 1} members</span>
+            </div>
+            <div class="person-sub">${escapeHtml(grp.lastText || 'Shared folder & group chat')}</div>
+          </div>
+        </div>
+        <div class="person-right">
+          <span style="font-size:10px; color:var(--text-muted);">${grp.lastAt ? timeAgo(grp.lastAt) : ''}</span>
+          ${unread > 0 ? `<span class="mini-tag" style="background:var(--danger); color:#fff;">${unread}</span>` : ''}
+        </div>
+      `;
+      bindDivButton(row, () => openGroupRoom(grp.groupId));
+      list.appendChild(row);
+    });
+  }
+
+  function openCreateGroupView() {
+    selectedGroupMembers = new Set();
+    selectedGroupColor = 'indigo';
+    $('newGroupNameInput').value = '';
+    $('newGroupDescInput').value = '';
+    document.querySelectorAll('#groupColorPicker .swatch-dot').forEach((d) => {
+      d.classList.toggle('active', d.dataset.gcolor === 'indigo');
+    });
+
+    const checklist = $('groupMemberChecklist');
+    const others = Object.values(directoryMap).filter((p) => p.key !== currentUser.key);
+    if (!others.length) {
+      checklist.innerHTML = `<div class="muted-sub" style="padding:12px;">No other members registered yet. You can create the room now and invite people later!</div>`;
+    } else {
+      checklist.innerHTML = '';
+      others.forEach((person) => {
+        const row = document.createElement('div');
+        row.className = 'person-row';
+        row.setAttribute('role', 'button');
+        row.setAttribute('tabindex', '0');
+        row.innerHTML = `
+          <div class="person-left">
+            ${renderAvatarHtml(person, 'small-avatar')}
+            <div class="person-meta">
+              <div class="person-name-line">${escapeHtml(person.displayName || person.handle)}</div>
+              <div class="person-sub">@${escapeHtml(person.key)}</div>
+            </div>
+          </div>
+          <div class="person-right">
+            <span class="mini-tag" data-check-badge="1">＋ Add</span>
+          </div>
+        `;
+        bindDivButton(row, () => {
+          if (selectedGroupMembers.has(person.key)) {
+            selectedGroupMembers.delete(person.key);
+            row.classList.remove('selected-member');
+            row.querySelector('[data-check-badge]').textContent = '＋ Add';
+          } else {
+            selectedGroupMembers.add(person.key);
+            row.classList.add('selected-member');
+            row.querySelector('[data-check-badge]').textContent = '✓ Added';
+          }
+        });
+        checklist.appendChild(row);
+      });
+    }
+
+    $('socialHubView').classList.add('hidden');
+    $('createGroupView').classList.remove('hidden');
+  }
+
+  async function submitCreateGroupVault() {
+    if (!currentUser) return;
+    const name = $('newGroupNameInput').value.trim();
+    if (!name) {
+      showToast('Enter a Group Room Name');
+      return;
+    }
+    const description = $('newGroupDescInput').value.trim() || 'Multi-person shared vault & group chat';
+    const groupId = generateId('grp');
+    const now = Date.now();
+    const myName = currentUser.displayName || currentUser.handle;
+
+    const members = {
+      [currentUser.key]: {
+        key: currentUser.key,
+        name: myName,
+        role: 'admin',
+        joinedAt: now
+      }
+    };
+
+    selectedGroupMembers.forEach((mKey) => {
+      const p = directoryMap[mKey];
+      members[mKey] = {
+        key: mKey,
+        name: p?.displayName || p?.handle || mKey,
+        role: 'member',
+        joinedAt: now
+      };
+    });
+
+    const memberCount = Object.keys(members).length;
+    const meta = {
+      id: groupId,
+      name,
+      description,
+      accent: selectedGroupColor,
+      createdBy: currentUser.key,
+      createdAt: now,
+      members
+    };
+
+    try {
+      await indexPut(`groups/${groupId}/meta`, meta);
+      const summary = {
+        groupId,
+        name,
+        accent: selectedGroupColor,
+        memberCount,
+        lastText: `${myName} created this group vault`,
+        lastAt: now,
+        unreadCount: 0
+      };
+
+      await Promise.all(
+        Object.keys(members).map((mKey) =>
+          indexPut(`userGroups/${mKey}/${groupId}`, {
+            ...summary,
+            unreadCount: mKey === currentUser.key ? 0 : 1
+          })
+        )
+      );
+
+      logActivityToChannel(
+        `👥 <b>New Group Vault Created</b>\n` +
+        `📂 <b>${escapeHtml(name)}</b> • Created by <b>${escapeHtml(myName)}</b> (${memberCount} members)`
+      );
+
+      $('createGroupView').classList.add('hidden');
+      openGroupRoom(groupId);
+      showToast(`Group Vault "${name}" created`);
+    } catch {
+      showToast('Could not create Group Vault');
+    }
+  }
+
+  async function openGroupRoom(groupId) {
+    closeSocialSubstreams();
+    activeGroupId = groupId;
+    groupMessages = {};
+    groupItems = {};
+    pendingGroupReply = null;
+
+    $('groupReplyBar').classList.add('hidden');
+    $('groupVaultPicker').classList.add('hidden');
+    $('groupMembersDrawer').classList.add('hidden');
+    $('groupQuickNoteBox').classList.add('hidden');
+
+    $('socialHubView').classList.add('hidden');
+    $('createGroupView').classList.add('hidden');
+    $('groupRoomView').classList.remove('hidden');
+    switchGroupRoomTab('chat');
+
+    try {
+      const meta = await indexGet(`groups/${groupId}/meta`);
+      if (!meta) {
+        showToast('Group room not found');
+        openSocialHub('groups');
+        return;
+      }
+      activeGroupMeta = meta;
+      renderGroupRoomHeader();
+
+      if (userGroupsMap[groupId]?.unreadCount) {
+        userGroupsMap[groupId].unreadCount = 0;
+        updateUnreadBadges();
+        indexPatch(`userGroups/${currentUser.key}/${groupId}`, { unreadCount: 0 }).catch(() => {});
+      }
+
+      // Live SSE stream for Group Chat Messages
+      groupMsgEventSource = new EventSource(`${INDEX_BASE}/groups/${groupId}/messages.json`);
+      const onGrpMsg = (e) => {
+        try {
+          const packet = JSON.parse(e.data);
+          applySsePatch(groupMessages, packet.path, packet.data);
+          renderGroupMessages();
+          if (userGroupsMap[groupId]?.unreadCount) {
+            userGroupsMap[groupId].unreadCount = 0;
+            updateUnreadBadges();
+            indexPatch(`userGroups/${currentUser.key}/${groupId}`, { unreadCount: 0 }).catch(() => {});
+          }
+        } catch {}
+      };
+      groupMsgEventSource.addEventListener('put', onGrpMsg);
+      groupMsgEventSource.addEventListener('patch', onGrpMsg);
+
+      // Live SSE stream for Shared Group Folder Items
+      groupItemsEventSource = new EventSource(`${INDEX_BASE}/groups/${groupId}/items.json`);
+      const onGrpItem = (e) => {
+        try {
+          const packet = JSON.parse(e.data);
+          applySsePatch(groupItems, packet.path, packet.data);
+          renderGroupFolderItems();
+        } catch {}
+      };
+      groupItemsEventSource.addEventListener('put', onGrpItem);
+      groupItemsEventSource.addEventListener('patch', onGrpItem);
+    } catch {
+      showToast('Could not load group room');
+    }
+  }
+
+  function renderGroupRoomHeader() {
+    if (!activeGroupMeta) return;
+    const members = Object.values(activeGroupMeta.members || {});
+    $('groupRoomTitle').textContent = activeGroupMeta.name;
+    $('groupRoomSub').textContent = `${members.length} member${members.length === 1 ? '' : 's'} • ${activeGroupMeta.description || 'Shared Folder'}`;
+
+    const list = $('groupMembersList');
+    list.innerHTML = '';
+    members.forEach((m) => {
+      const chip = document.createElement('div');
+      chip.className = 'filter-chip folder-chip';
+      chip.textContent = `@${m.key}${m.role === 'admin' ? ' ★' : ''}`;
+      list.appendChild(chip);
+    });
+
+    const select = $('groupAddMemberSelect');
+    const existingKeys = new Set(Object.keys(activeGroupMeta.members || {}));
+    const candidates = Object.values(directoryMap).filter((p) => !existingKeys.has(p.key));
+    select.innerHTML = '';
+    if (!candidates.length) {
+      const opt = document.createElement('option');
+      opt.value = '';
+      opt.textContent = 'All registered members are in this room';
+      select.appendChild(opt);
+    } else {
+      candidates.forEach((p) => {
+        const opt = document.createElement('option');
+        opt.value = p.key;
+        opt.textContent = `${p.displayName || p.handle} (@${p.key})`;
+        select.appendChild(opt);
+      });
+    }
+  }
+
+  async function addMemberToActiveGroup() {
+    if (!activeGroupMeta || !activeGroupId) return;
+    const newKey = $('groupAddMemberSelect').value;
+    if (!newKey) {
+      showToast('No additional members available to add');
+      return;
+    }
+    const person = directoryMap[newKey];
+    const now = Date.now();
+    const memberObj = {
+      key: newKey,
+      name: person?.displayName || person?.handle || newKey,
+      role: 'member',
+      joinedAt: now
+    };
+
+    try {
+      await indexPut(`groups/${activeGroupId}/meta/members/${newKey}`, memberObj);
+      activeGroupMeta.members[newKey] = memberObj;
+      const memberCount = Object.keys(activeGroupMeta.members).length;
+
+      await Promise.all(
+        Object.keys(activeGroupMeta.members).map((mKey) =>
+          indexPut(`userGroups/${mKey}/${activeGroupId}`, {
+            groupId: activeGroupId,
+            name: activeGroupMeta.name,
+            accent: activeGroupMeta.accent || 'indigo',
+            memberCount,
+            lastText: `${memberObj.name} joined the group vault`,
+            lastAt: now,
+            unreadCount: mKey === currentUser.key ? 0 : 1
+          })
+        )
+      );
+
+      renderGroupRoomHeader();
+      showToast(`Added ${memberObj.name} to room`);
+    } catch {
+      showToast('Could not add member');
+    }
+  }
+
+  function switchGroupRoomTab(tab) {
+    $('tabGroupChat').classList.toggle('active', tab === 'chat');
+    $('tabGroupFolder').classList.toggle('active', tab === 'folder');
+    $('groupChatPane').classList.toggle('hidden', tab !== 'chat');
+    $('groupFolderPane').classList.toggle('hidden', tab !== 'folder');
+    if (tab === 'folder') renderGroupFolderItems();
+  }
+
+  function renderGroupMessages() {
+    const stream = $('groupMessagesStream');
+    const msgs = Object.values(groupMessages).sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+
+    if (!msgs.length) {
+      stream.innerHTML = `<div class="empty-state"><p>Welcome to <strong>${escapeHtml(activeGroupMeta?.name || 'Group Vault')}</strong>. Send a message or drop files for everyone in the room.</p></div>`;
+      return;
+    }
+
+    stream.innerHTML = '';
+    msgs.forEach((m) => {
+      const isMine = m.from === currentUser.key;
+      const row = document.createElement('div');
+      row.className = `msg-row ${isMine ? 'mine' : 'theirs'}`;
+
+      if (!isMine) {
+        const senderTag = document.createElement('div');
+        senderTag.className = 'msg-sender-tag';
+        senderTag.textContent = `${m.fromName || m.from} (@${m.from})`;
+        row.appendChild(senderTag);
+      }
+
+      const bubble = document.createElement('div');
+      bubble.className = 'msg-bubble';
+
+      if (m.replyTo) {
+        const qDiv = document.createElement('div');
+        qDiv.className = 'msg-quote';
+        qDiv.innerHTML = `<strong>${escapeHtml(m.replyTo.author)}</strong>: ${escapeHtml(m.replyTo.text)}`;
+        bubble.appendChild(qDiv);
+      }
+
+      if (m.text) {
+        const tDiv = document.createElement('div');
+        tDiv.textContent = m.text;
+        bubble.appendChild(tDiv);
+      }
+
+      if (m.attachment) {
+        const att = m.attachment;
+        const attBox = document.createElement('div');
+        attBox.className = 'msg-attachment';
+        attBox.innerHTML = `
+          <div class="att-top">
+            <span style="font-size:22px;">${getCategoryIcon(att)}</span>
+            <div>
+              <div class="att-title">${escapeHtml(att.title)}</div>
+              <div class="att-size">${formatBytes(att.size || 0)} • In Shared Folder</div>
+            </div>
+          </div>
+          <div class="att-actions">
+            <div class="att-btn" role="button" tabindex="0" data-gatt-open="1">Open</div>
+            <div class="att-btn" role="button" tabindex="0" data-gatt-save="1">＋ Save to My Vault</div>
+          </div>
+        `;
+        bindDivButton(attBox.querySelector('[data-gatt-open]'), () => openPreview(att));
+        bindDivButton(attBox.querySelector('[data-gatt-save]'), () => cloneSharedAttachmentToVault(att, activeGroupMeta?.name || 'Group Vault'));
+        bubble.appendChild(attBox);
+      }
+
+      row.appendChild(bubble);
+
+      const meta = document.createElement('div');
+      meta.className = 'msg-meta-line';
+      meta.innerHTML = `<span>${formatClock(m.createdAt || Date.now())}</span>`;
+
+      const replyBtn = document.createElement('span');
+      replyBtn.className = 'reply-trigger';
+      replyBtn.textContent = 'Reply';
+      bindDivButton(replyBtn, () => {
+        pendingGroupReply = {
+          id: m.id,
+          author: m.fromName || m.from,
+          text: (m.text || m.attachment?.title || 'Attachment').slice(0, 70)
+        };
+        $('groupReplyAuthor').textContent = `Replying to ${pendingGroupReply.author}`;
+        $('groupReplySnippet').textContent = pendingGroupReply.text;
+        $('groupReplyBar').classList.remove('hidden');
+        $('groupMessageInput').focus();
+      });
+      meta.appendChild(replyBtn);
+
+      row.appendChild(meta);
+      stream.appendChild(row);
+    });
+
+    stream.scrollTop = stream.scrollHeight;
+  }
+
+  function renderGroupFolderItems() {
+    const grid = $('groupItemsGrid');
+    const items = Object.values(groupItems).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+    $('tabGroupFolder').textContent = `📂 Shared Folder (${items.length})`;
+
+    if (!items.length) {
+      grid.innerHTML = `<div class="empty-state"><p>No files or notes in this group folder yet. Tap <strong>＋ Upload File to Group</strong> above.</p></div>`;
+      return;
+    }
+
+    grid.innerHTML = '';
+    items.forEach((it) => {
+      const row = document.createElement('div');
+      row.className = 'person-row';
+      row.setAttribute('role', 'button');
+      row.setAttribute('tabindex', '0');
+      row.innerHTML = `
+        <div class="person-left">
+          <div class="item-badge">${getCategoryIcon(it)}</div>
+          <div class="person-meta">
+            <div class="person-name-line">${escapeHtml(it.title)}</div>
+            <div class="person-sub">Added by ${escapeHtml(it.addedByName || it.addedBy || 'Member')} • ${formatBytes(it.size || 0)} • ${timeAgo(it.createdAt || Date.now())}</div>
+          </div>
+        </div>
+        <div class="person-right" style="flex-direction:row; gap:6px;">
+          <span class="pill-btn glass-pill compact-pill" data-gitem-open="1">Open</span>
+          <span class="pill-btn primary-pill compact-pill" data-gitem-save="1">Save</span>
+        </div>
+      `;
+      bindDivButton(row.querySelector('[data-gitem-open]'), (e) => {
+        e.stopPropagation();
+        openPreview(it);
+      });
+      bindDivButton(row.querySelector('[data-gitem-save]'), (e) => {
+        e.stopPropagation();
+        cloneSharedAttachmentToVault(it, activeGroupMeta?.name || 'Group Vault');
+      });
+      bindDivButton(row, () => openPreview(it));
+      grid.appendChild(row);
+    });
+  }
+
+  async function sendGroupPayload({ text = '', attachment = null, replyToShardMessageId = null }) {
+    if (!currentUser || !activeGroupId || !activeGroupMeta) return;
+    const cleanText = text.trim();
+    if (!cleanText && !attachment) return;
+
+    const msgId = generateId();
+    const now = Date.now();
+    const myName = currentUser.displayName || currentUser.handle;
+
+    const msgObj = {
+      id: msgId,
+      from: currentUser.key,
+      fromName: myName,
+      text: cleanText,
+      attachment: attachment || null,
+      replyTo: pendingGroupReply || null,
+      createdAt: now
+    };
+
+    pendingGroupReply = null;
+    $('groupReplyBar').classList.add('hidden');
+    $('groupMessageInput').value = '';
+
+    groupMessages[msgId] = msgObj;
+    renderGroupMessages();
+
+    const preview = attachment
+      ? `${myName}: 📎 ${attachment.title}`
+      : `${myName}: ${cleanText}`;
+
+    try {
+      const writes = [indexPut(`groups/${activeGroupId}/messages/${msgId}`, msgObj)];
+
+      if (attachment) {
+        const folderItemId = attachment.id || generateId();
+        const folderItem = {
+          ...attachment,
+          id: folderItemId,
+          addedBy: currentUser.key,
+          addedByName: myName,
+          createdAt: now
+        };
+        groupItems[folderItemId] = folderItem;
+        renderGroupFolderItems();
+        writes.push(indexPut(`groups/${activeGroupId}/items/${folderItemId}`, folderItem));
+      }
+
+      const memberKeys = Object.keys(activeGroupMeta.members || {});
+      for (const mKey of memberKeys) {
+        const prev = mKey === currentUser.key ? null : await indexGet(`userGroups/${mKey}/${activeGroupId}`).catch(() => null);
+        const nextUnread = mKey === currentUser.key ? 0 : (Number(prev?.unreadCount) || 0) + 1;
+        writes.push(
+          indexPut(`userGroups/${mKey}/${activeGroupId}`, {
+            groupId: activeGroupId,
+            name: activeGroupMeta.name,
+            accent: activeGroupMeta.accent || 'indigo',
+            memberCount: memberKeys.length,
+            lastText: preview,
+            lastAt: now,
+            unreadCount: nextUnread
+          })
+        );
+      }
+
+      await Promise.all(writes);
+
+      let logHtml = `👥 <b>[${escapeHtml(activeGroupMeta.name)}] ${escapeHtml(myName)}</b>\n`;
+      if (attachment) {
+        logHtml += `📂 Added <b>${escapeHtml(attachment.title)}</b> (${formatBytes(attachment.size || 0)})\n`;
+      }
+      if (cleanText) {
+        logHtml += `<blockquote>${escapeHtml(cleanText)}</blockquote>`;
+      }
+      logActivityToChannel(logHtml, replyToShardMessageId);
+    } catch {
+      showToast('Failed to send to group');
+    }
+  }
+
+  async function handleGroupFileUploads(fileList) {
+    const files = Array.from(fileList || []);
+    if (!files.length || !activeGroupId) return;
+
+    for (const file of files) {
+      try {
+        const id = generateId();
+        const rawBuffer = await file.arrayBuffer();
+        const { compressed, storedBytes, shards } = await uploadBufferToCloud(id, rawBuffer, file.name);
+        setTransferProgress(false);
+
+        const lastShardMsgId = shards[shards.length - 1]?.messageId || null;
+        const caption = $('groupMessageInput').value.trim();
+
+        await sendGroupPayload({
+          text: caption,
+          attachment: {
+            id,
+            kind: 'file',
+            title: file.name,
+            mime: file.type || 'application/octet-stream',
+            size: file.size,
+            storedBytes,
+            compressed,
+            shards
+          },
+          replyToShardMessageId: lastShardMsgId
+        });
+        showToast(`Added "${file.name}" to group`);
+      } catch (err) {
+        setTransferProgress(false);
+        showToast(`Failed ${file.name}: ${err.message}`);
+      }
+    }
+  }
+
+  async function saveGroupSharedNote() {
+    if (!activeGroupId) return;
+    const title = $('groupNoteTitleInput').value.trim() || `Group Note ${new Date().toLocaleTimeString()}`;
+    const body = $('groupNoteBodyInput').value;
+    if (!body.trim()) {
+      showToast('Note content cannot be empty');
+      return;
+    }
+
+    try {
+      const id = generateId();
+      const rawBuffer = new TextEncoder().encode(body).buffer;
+      const { compressed, storedBytes, shards } = await uploadBufferToCloud(id, rawBuffer, title);
+      setTransferProgress(false);
+
+      $('groupNoteTitleInput').value = '';
+      $('groupNoteBodyInput').value = '';
+      $('groupQuickNoteBox').classList.add('hidden');
+
+      await sendGroupPayload({
+        text: `Shared a note: ${title}`,
+        attachment: {
+          id,
+          kind: 'note',
+          title,
+          mime: 'text/plain;charset=utf-8',
+          size: rawBuffer.byteLength,
+          storedBytes,
+          compressed,
+          shards,
+          snippet: body.slice(0, 120)
+        }
+      });
+      showToast('Note posted to group folder');
+    } catch (err) {
+      setTransferProgress(false);
+      showToast(err.message || 'Could not post note');
+    }
+  }
+
+  function toggleGroupVaultPicker() {
+    const drawer = $('groupVaultPicker');
+    if (!drawer.classList.contains('hidden')) {
+      drawer.classList.add('hidden');
+      return;
+    }
+    const list = $('groupVaultPickerList');
+    const shareable = Object.values(itemsMap)
+      .filter((it) => !it.encrypted)
+      .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+
+    if (!shareable.length) {
+      showToast('No unencrypted items in your vault yet');
+      return;
+    }
+
+    list.innerHTML = '';
+    shareable.forEach((it) => {
+      const row = document.createElement('div');
+      row.className = 'picker-item';
+      row.setAttribute('role', 'button');
+      row.setAttribute('tabindex', '0');
+      row.innerHTML = `
+        <span style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:72%;">
+          ${getCategoryIcon(it)} ${escapeHtml(it.title)}
+        </span>
+        <span style="color:var(--text-muted); font-size:11px;">${formatBytes(it.size || 0)}</span>
+      `;
+      bindDivButton(row, () => {
+        drawer.classList.add('hidden');
+        if (!it.sharedRef && itemsMap[it.id]) {
+          itemsMap[it.id].sharedRef = true;
+          indexPatch(`vault/${currentUser.key}/meta/${it.id}`, { sharedRef: true }).catch(() => {});
+        }
+        sendGroupPayload({
+          text: $('groupMessageInput').value.trim(),
+          attachment: {
+            id: generateId(),
+            kind: it.kind,
+            title: it.title,
+            mime: it.mime || 'application/octet-stream',
+            size: it.size || 0,
+            compressed: Boolean(it.compressed),
+            shards: it.shards || it.tgShards || [],
+            url: it.url || ''
+          }
+        });
+      });
+      list.appendChild(row);
+    });
+    drawer.classList.remove('hidden');
+  }
+
+  // CREATE / STORE PERSONAL VAULT ACTIONS
   function parseTags(raw) {
     return (raw || '')
       .split(',')
@@ -1354,9 +2406,9 @@
       .filter(Boolean);
   }
 
-  function parseFolder(raw) {
-    const clean = (raw || '').trim().replace(/[.#$/[\]]/g, '');
-    return clean || 'General';
+  function getSelectedCreateFolder() {
+    const val = $('itemFolderSelect')?.value || 'General';
+    return val.trim() || 'General';
   }
 
   async function storeFiles(fileList) {
@@ -1365,7 +2417,7 @@
 
     $('createModal').classList.add('hidden');
     const tags = parseTags($('itemTags').value);
-    const folder = parseFolder($('itemFolder').value);
+    const folder = getSelectedCreateFolder();
 
     for (const file of files) {
       try {
@@ -1395,7 +2447,7 @@
         await edgeCache.set(`${currentUser.key}:${id}`, rawBuffer);
         itemsMap[id] = meta;
         renderVault();
-        showToast(`Stored ${file.name}`);
+        showToast(`Stored ${file.name} in ${folder}`);
       } catch (err) {
         showToast(`Failed ${file.name}: ${err.message}`);
       }
@@ -1403,7 +2455,6 @@
     setTransferProgress(false);
     $('filePicker').value = '';
     $('itemTags').value = '';
-    $('itemFolder').value = '';
   }
 
   async function storeNote() {
@@ -1424,7 +2475,7 @@
     try {
       const id = generateId();
       const tags = parseTags($('itemTags').value);
-      const folder = parseFolder($('itemFolder').value);
+      const folder = getSelectedCreateFolder();
       const payloadText = isEncrypted ? await encryptText(body, pass) : body;
       const rawBuffer = new TextEncoder().encode(payloadText).buffer;
       const { compressed, storedBytes, shards } = await uploadBufferToCloud(id, rawBuffer, title);
@@ -1457,9 +2508,8 @@
       $('noteBody').value = '';
       $('encryptPass').value = '';
       $('itemTags').value = '';
-      $('itemFolder').value = '';
       $('createModal').classList.add('hidden');
-      showToast('Note saved');
+      showToast(`Note saved in ${folder}`);
     } catch (err) {
       setTransferProgress(false);
       showToast(err.message || 'Unable to save note');
@@ -1478,7 +2528,7 @@
     try {
       const id = generateId();
       const tags = parseTags($('itemTags').value);
-      const folder = parseFolder($('itemFolder').value);
+      const folder = getSelectedCreateFolder();
       const meta = {
         id,
         kind: 'link',
@@ -1503,9 +2553,8 @@
       $('linkUrl').value = '';
       $('linkTitle').value = '';
       $('itemTags').value = '';
-      $('itemFolder').value = '';
       $('createModal').classList.add('hidden');
-      showToast('Link saved');
+      showToast(`Link saved in ${folder}`);
     } catch (err) {
       showToast(err.message || 'Unable to save link');
     }
@@ -1556,7 +2605,7 @@
         return;
       }
 
-      const rawBuf = await downloadBufferFromCloud(item);
+      const rawBuf = await downloadBufferFromCloud(item, true);
 
       if (item.encrypted) {
         viewport.classList.add('hidden');
@@ -1629,7 +2678,7 @@
     }
 
     $('editItemTitle').value = activeItem.title || '';
-    $('editItemFolder').value = activeItem.folder || 'General';
+    populateFolderSelect($('editItemFolderSelect'), activeItem.folder || 'General');
     $('editItemTags').value = (activeItem.tags || []).join(', ');
     selectedCardAccent = activeItem.accent || 'default';
     document.querySelectorAll('#cardColorPicker .swatch-dot').forEach((d) => {
@@ -1651,7 +2700,7 @@
   async function saveItemCustomizations() {
     if (!activeItem) return;
     const nextTitle = $('editItemTitle').value.trim() || activeItem.title;
-    const nextFolder = parseFolder($('editItemFolder').value);
+    const nextFolder = $('editItemFolderSelect').value || 'General';
     const nextTags = parseTags($('editItemTags').value);
     const nextAccent = selectedCardAccent;
 
@@ -1774,7 +2823,6 @@
     const target = activeItem;
     closePreview();
     try {
-      // Only erase remote binary shards if this item has not been shared with another user
       if (!target.sharedRef) {
         eraseRemoteShards(target.shards || target.tgShards || []);
       }
@@ -1906,6 +2954,7 @@
         bio: currentUser.bio
       },
       exportedAt: new Date().toISOString(),
+      folders: foldersMap,
       items: itemsMap
     }, null, 2);
     const blob = new Blob([payload], { type: 'application/json' });
@@ -2002,6 +3051,7 @@
       await Promise.all([
         indexDelete(`vault/${currentUser.key}`),
         indexDelete(`inbox/${currentUser.key}`),
+        indexDelete(`userGroups/${currentUser.key}`),
         indexDelete(`directory/${currentUser.key}`),
         indexDelete(`users/${currentUser.key}`)
       ]);
@@ -2015,6 +3065,8 @@
   }
 
   function openCreateModal(tab = 'files') {
+    const defaultFolder = activeFolder !== 'all' ? activeFolder : 'General';
+    populateFolderSelect($('itemFolderSelect'), defaultFolder);
     $('createModal').classList.remove('hidden');
     document.querySelectorAll('[data-create-tab]').forEach((el) => {
       el.classList.toggle('active', el.dataset.createTab === tab);
@@ -2035,18 +3087,88 @@
     });
   });
 
+  // STANDALONE DROP LINK VIEWER BINDINGS
+  bindDivButton($('dropDownloadBtn'), downloadActiveDropItem);
+  bindDivButton($('dropSaveVaultBtn'), saveActiveDropToMyVault);
+  bindDivButton($('dropGoAppBtn'), () => {
+    clearShareUrlParam();
+    $('dropViewerView').classList.add('hidden');
+    if (currentUser) {
+      enterWorkspace();
+    } else {
+      $('authView').classList.remove('hidden');
+    }
+  });
+
+  // DROP LINK MODAL BINDINGS
+  bindDivButton($('closeDropLinkBtn'), () => $('dropLinkModal').classList.add('hidden'));
+  bindDivButton($('dropModePublicBtn'), () => {
+    selectedDropMode = 'public';
+    $('dropModePublicBtn').classList.add('active');
+    $('dropModeSecureBtn').classList.remove('active');
+    $('dropModeHint').textContent = 'Anyone with this link can view & download immediately — no account needed.';
+  });
+  bindDivButton($('dropModeSecureBtn'), () => {
+    selectedDropMode = 'secure';
+    $('dropModeSecureBtn').classList.add('active');
+    $('dropModePublicBtn').classList.remove('active');
+    $('dropModeHint').textContent = 'Account sign-in required before anyone can view or download this item.';
+  });
+  document.querySelectorAll('#dropExpiryRow .capsule-tab').forEach((tab) => {
+    bindDivButton(tab, () => {
+      selectedDropExpiryMs = Number(tab.dataset.expiry) || 0;
+      document.querySelectorAll('#dropExpiryRow .capsule-tab').forEach((t) => t.classList.remove('active'));
+      tab.classList.add('active');
+    });
+  });
+  bindDivButton($('generateDropLinkBtn'), generateDropLink);
+  bindDivButton($('copyDropUrlBtn'), async () => {
+    const val = $('dropGeneratedUrl').value;
+    if (!val) return;
+    try {
+      await navigator.clipboard.writeText(val);
+      showToast('Drop Link copied to clipboard');
+    } catch {
+      showToast('Select and copy the URL manually');
+    }
+  });
+  bindDivButton($('revokeDropLinkBtn'), revokeActiveDropLink);
+
+  // FOLDER MODAL BINDINGS
+  bindDivButton($('quickFolderBtn'), openCreateFolderModal);
+  bindDivButton($('quickNewFolderInlineBtn'), openCreateFolderModal);
+  bindDivButton($('closeFolderBtn'), () => $('folderModal').classList.add('hidden'));
+  bindDivButton($('createFolderSubmitBtn'), submitCreateFolder);
+  $('newFolderNameInput').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') submitCreateFolder();
+  });
+  document.querySelectorAll('#folderColorPicker .swatch-dot').forEach((dot) => {
+    bindDivButton(dot, () => {
+      selectedFolderColor = dot.dataset.fcolor;
+      document.querySelectorAll('#folderColorPicker .swatch-dot').forEach((d) => d.classList.remove('active'));
+      dot.classList.add('active');
+    });
+  });
+
+  // WORKSPACE HEADER BINDINGS
   bindDivButton($('headerAvatarBtn'), () => openAccountModal('profile'));
   bindDivButton($('accountBtn'), () => openAccountModal('profile'));
   bindDivButton($('closeAccountBtn'), () => $('accountModal').classList.add('hidden'));
   bindDivButton($('syncNowBtn'), () => syncVault(false));
   bindDivButton($('logoutBtn'), signOut);
 
-  // SOCIAL HUB & DM BINDINGS
+  // SOCIAL HUB, DM & GROUP VAULT ROOM BINDINGS
   bindDivButton($('memberCountBtn'), () => openSocialHub('people'));
   bindDivButton($('chatHubBtn'), () => openSocialHub('chats'));
   bindDivButton($('dockChatBtn'), () => openSocialHub('chats'));
-  bindDivButton($('closeSocialBtn'), () => $('socialModal').classList.add('hidden'));
-  bindDivButton($('closeThreadModalBtn'), () => $('socialModal').classList.add('hidden'));
+  bindDivButton($('closeSocialBtn'), () => {
+    closeSocialSubstreams();
+    $('socialModal').classList.add('hidden');
+  });
+  bindDivButton($('closeThreadModalBtn'), () => {
+    closeSocialSubstreams();
+    $('socialModal').classList.add('hidden');
+  });
   bindDivButton($('backToHubBtn'), () => openSocialHub(activeSocialTab));
 
   document.querySelectorAll('[data-social-tab]').forEach((tab) => {
@@ -2056,27 +3178,79 @@
   $('socialSearchInput').addEventListener('input', (e) => {
     socialSearch = e.target.value;
     if (activeSocialTab === 'chats') renderInboxList();
+    else if (activeSocialTab === 'groups') renderGroupVaultList();
     else renderPeopleDirectory();
   });
 
+  // CREATE GROUP VAULT BINDINGS
+  bindDivButton($('openCreateGroupBtn'), openCreateGroupView);
+  bindDivButton($('backFromCreateGroupBtn'), () => openSocialHub('groups'));
+  bindDivButton($('closeCreateGroupBtn'), () => $('socialModal').classList.add('hidden'));
+  bindDivButton($('submitCreateGroupBtn'), submitCreateGroupVault);
+  document.querySelectorAll('#groupColorPicker .swatch-dot').forEach((dot) => {
+    bindDivButton(dot, () => {
+      selectedGroupColor = dot.dataset.gcolor;
+      document.querySelectorAll('#groupColorPicker .swatch-dot').forEach((d) => d.classList.remove('active'));
+      dot.classList.add('active');
+    });
+  });
+
+  // GROUP VAULT ROOM BINDINGS
+  bindDivButton($('backFromGroupBtn'), () => openSocialHub('groups'));
+  bindDivButton($('closeGroupRoomBtn'), () => {
+    closeSocialSubstreams();
+    $('socialModal').classList.add('hidden');
+  });
+  bindDivButton($('groupMembersBtn'), () => {
+    $('groupMembersDrawer').classList.toggle('hidden');
+  });
+  bindDivButton($('groupAddMemberBtn'), addMemberToActiveGroup);
+  document.querySelectorAll('[data-groom-tab]').forEach((tab) => {
+    bindDivButton(tab, () => switchGroupRoomTab(tab.dataset.groomTab));
+  });
+  bindDivButton($('cancelGroupReplyBtn'), () => {
+    pendingGroupReply = null;
+    $('groupReplyBar').classList.add('hidden');
+  });
+  bindDivButton($('groupAttachVaultBtn'), toggleGroupVaultPicker);
+  bindDivButton($('closeGroupVaultPickerBtn'), () => $('groupVaultPicker').classList.add('hidden'));
+  $('groupDirectFileInput').addEventListener('change', (e) => {
+    handleGroupFileUploads(e.target.files);
+    e.target.value = '';
+  });
+  $('groupFolderUploadInput').addEventListener('change', (e) => {
+    handleGroupFileUploads(e.target.files);
+    e.target.value = '';
+  });
+  bindDivButton($('groupToggleNoteBtn'), () => {
+    $('groupQuickNoteBox').classList.toggle('hidden');
+  });
+  bindDivButton($('groupSaveNoteBtn'), saveGroupSharedNote);
+  bindDivButton($('sendGroupChatBtn'), () => {
+    sendGroupPayload({ text: $('groupMessageInput').value });
+  });
+  $('groupMessageInput').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      sendGroupPayload({ text: $('groupMessageInput').value });
+    }
+  });
+
+  // 1-ON-1 DM COMPOSER BINDINGS
   bindDivButton($('cancelReplyBtn'), () => {
     pendingReply = null;
     $('replyQuoteBar').classList.add('hidden');
   });
-
   bindDivButton($('attachVaultBtn'), toggleChatVaultPicker);
   bindDivButton($('closeVaultPickerBtn'), () => $('chatVaultPicker').classList.add('hidden'));
-
   $('chatDirectFileInput').addEventListener('change', (e) => {
     const file = e.target.files?.[0];
     if (file) handleDirectFileUploadInChat(file);
     e.target.value = '';
   });
-
   bindDivButton($('sendChatBtn'), () => {
     sendChatPayload({ text: $('chatMessageInput').value });
   });
-
   $('chatMessageInput').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') {
       e.preventDefault();
@@ -2088,14 +3262,12 @@
   document.querySelectorAll('[data-acc-tab]').forEach((tab) => {
     bindDivButton(tab, () => switchAccountTab(tab.dataset.accTab));
   });
-
   $('avatarFileInput').addEventListener('change', (e) => handleAvatarPick(e.target.files?.[0]));
   bindDivButton($('removeAvatarBtn'), () => {
     pendingAvatarData = '';
     $('accAvatarPreview').classList.add('hidden');
     $('accAvatarInitial').classList.remove('hidden');
   });
-
   document.querySelectorAll('#themePicker .swatch-dot').forEach((dot) => {
     bindDivButton(dot, () => {
       selectedTheme = dot.dataset.theme;
@@ -2104,7 +3276,6 @@
       dot.classList.add('active');
     });
   });
-
   bindDivButton($('saveProfileBtn'), saveAccountProfile);
   bindDivButton($('exportDataBtn'), exportAccountBackup);
   bindDivButton($('purgeVaultBtn'), purgeAllVaultData);
@@ -2117,14 +3288,12 @@
     $('clearSearchBtn').classList.toggle('hidden', !searchQuery);
     renderVault();
   });
-
   bindDivButton($('clearSearchBtn'), () => {
     searchQuery = '';
     $('searchInput').value = '';
     $('clearSearchBtn').classList.add('hidden');
     renderVault();
   });
-
   document.querySelectorAll('[data-filter]').forEach((chip) => {
     bindDivButton(chip, () => {
       activeFilter = chip.dataset.filter;
@@ -2158,6 +3327,11 @@
 
   bindDivButton($('closePreviewBtn'), closePreview);
   bindDivButton($('unlockItemBtn'), handleDecrypt);
+  bindDivButton($('previewDropLinkBtn'), () => {
+    if (!activeItem) return;
+    const target = { ...activeItem };
+    openDropLinkModal(target);
+  });
   bindDivButton($('previewShareBtn'), () => {
     if (!activeItem) return;
     if (activeItem.encrypted) {
@@ -2186,23 +3360,20 @@
   // GLOBAL DRAG & DROP
   let dragDepth = 0;
   window.addEventListener('dragenter', (e) => {
-    if (!currentUser) return;
+    if (!currentUser || !$('dropViewerView').classList.contains('hidden')) return;
     e.preventDefault();
     dragDepth++;
     $('dropOverlay').classList.remove('hidden');
   });
-
   window.addEventListener('dragover', (e) => {
     if (!currentUser) return;
     e.preventDefault();
   });
-
   window.addEventListener('dragleave', () => {
     if (!currentUser) return;
     dragDepth = Math.max(0, dragDepth - 1);
     if (dragDepth === 0) $('dropOverlay').classList.add('hidden');
   });
-
   window.addEventListener('drop', (e) => {
     if (!currentUser) return;
     e.preventDefault();
@@ -2233,29 +3404,36 @@
     }
   });
 
-  // RECONNECT LIVE STREAMS WHEN RETURNING TO TAB / APP ON MOBILE
+  // RECONNECT LIVE STREAMS ON TAB RETURN
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible' && currentUser) {
       startInboxStream();
+      startUserGroupsStream();
       if (activePeer) openConversation(activePeer);
+      if (activeGroupId) openGroupRoom(activeGroupId);
     }
   });
 
-  // INITIALIZE PUBLIC MEMBER COUNT & RESTORE SESSION
-  refreshDirectory();
+  // STARTUP: RESTORE SESSION & RESOLVE INCOMING ?share= DROP LINK
+  (async () => {
+    refreshDirectory();
+    try {
+      const saved = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null');
+      if (saved && saved.key) {
+        currentUser = {
+          key: saved.key,
+          handle: saved.handle,
+          displayName: saved.handle,
+          bio: '',
+          theme: 'indigo',
+          avatarData: ''
+        };
+        enterWorkspace();
+      }
+    } catch {}
 
-  try {
-    const saved = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null');
-    if (saved && saved.key) {
-      currentUser = {
-        key: saved.key,
-        handle: saved.handle,
-        displayName: saved.handle,
-        bio: '',
-        theme: 'indigo',
-        avatarData: ''
-      };
-      enterWorkspace();
+    if (pendingDropId) {
+      await resolveIncomingDropLink(pendingDropId);
     }
-  } catch {}
+  })();
 })();
