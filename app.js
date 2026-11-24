@@ -1,19 +1,19 @@
 (() => {
   'use strict';
 
-  // STRICT RTDB ENDPOINT & ROOT FOLDER
+  // STRICT RTDB ENDPOINT & ROOT FOLDER (METADATA & AUTH ONLY — 0 KB FILE TRAFFIC)
   const RTDB_BASE = 'https://cloud-db-studio-default-rtdb.firebaseio.com/onlymeted';
-  const SHARD_SIZE = 360 * 1024; // 360 KB Base64 shard per RTDB node
-  const PARALLEL_WORKERS = 4;
-  const SESSION_KEY = 'onlymeted_session_v1';
+  // 18 MB raw binary shard stays safely below Telegram's 20 MB getFile download limit
+  const TG_SHARD_BYTES = 18 * 1024 * 1024;
+  const PARALLEL_DOWNLOADS = 3;
+  const SESSION_KEY = 'onlymeted_session_v2';
 
-  // Disable right-click context menu
   document.addEventListener('contextmenu', (e) => e.preventDefault());
 
-  // State
-  let currentUser = null; // { key, handle }
+  let currentUser = null;
   let authMode = 'login';
   let itemsMap = {};
+  let tgConfig = { workerUrl: '', botToken: '', chatId: '' };
   let activeFilter = 'all';
   let searchQuery = '';
   let activeItem = null;
@@ -21,10 +21,9 @@
   let activePlainText = '';
   let deleteConfirmArmed = false;
 
-  // DOM Helpers
   const $ = (id) => document.getElementById(id);
 
-  function showToast(msg, ms = 2600) {
+  function showToast(msg, ms = 2700) {
     const stack = $('toastStack');
     const el = document.createElement('div');
     el.className = 'toast-pill';
@@ -71,6 +70,10 @@
     return `${Date.now().toString(36)}_${crypto.getRandomValues(new Uint32Array(1))[0].toString(36)}`;
   }
 
+  function sleep(ms) {
+    return new Promise((r) => setTimeout(r, ms));
+  }
+
   // RTDB REST HELPERS
   async function rtdbGet(path) {
     const res = await fetch(`${RTDB_BASE}/${path}.json`);
@@ -103,16 +106,14 @@
     if (!res.ok) throw new Error(`RTDB DELETE failed (${res.status})`);
   }
 
-  // INDEXEDDB EDGE CACHE FOR INSTANT RE-OPEN
+  // INDEXEDDB EDGE CACHE FOR ZERO-LATENCY REPEAT ACCESS
   const edgeCache = {
     dbPromise: null,
     open() {
       if (this.dbPromise) return this.dbPromise;
       this.dbPromise = new Promise((resolve, reject) => {
-        const req = indexedDB.open('OnlyMeTedEdgeCache', 1);
-        req.onupgradeneeded = () => {
-          req.result.createObjectStore('blobs');
-        };
+        const req = indexedDB.open('OnlyMeTedTgCache', 1);
+        req.onupgradeneeded = () => req.result.createObjectStore('blobs');
         req.onsuccess = () => resolve(req.result);
         req.onerror = () => reject(req.error);
       });
@@ -140,9 +141,7 @@
           tx.oncomplete = () => resolve();
           tx.onerror = () => resolve();
         });
-      } catch {
-        // Ignore quota limits silently
-      }
+      } catch {}
     },
     async del(key) {
       try {
@@ -157,7 +156,7 @@
     }
   };
 
-  // CRYPTO HELPERS (SHA-256 AUTH + AES-GCM 256 LOCKER)
+  // CRYPTO HELPERS
   async function sha256Hex(str) {
     const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
     return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, '0')).join('');
@@ -166,6 +165,25 @@
   function randomHex(bytesLen = 16) {
     const arr = crypto.getRandomValues(new Uint8Array(bytesLen));
     return Array.from(arr).map((b) => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  function arrayBufferToBase64(buffer) {
+    const bytes = new Uint8Array(buffer);
+    const chunk = 0x8000;
+    let binary = '';
+    for (let i = 0; i < bytes.length; i += chunk) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+    }
+    return btoa(binary);
+  }
+
+  function base64ToArrayBuffer(base64) {
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return bytes.buffer;
   }
 
   async function deriveAesKey(passphrase, saltBytes) {
@@ -211,27 +229,7 @@
     return new TextDecoder().decode(plainBuf);
   }
 
-  // STREAM COMPRESSION & BASE64 ENGINE
-  function arrayBufferToBase64(buffer) {
-    const bytes = new Uint8Array(buffer);
-    const chunk = 0x8000;
-    let binary = '';
-    for (let i = 0; i < bytes.length; i += chunk) {
-      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
-    }
-    return btoa(binary);
-  }
-
-  function base64ToArrayBuffer(base64) {
-    const binary = atob(base64);
-    const len = binary.length;
-    const bytes = new Uint8Array(len);
-    for (let i = 0; i < len; i++) {
-      bytes[i] = binary.charCodeAt(i);
-    }
-    return bytes.buffer;
-  }
-
+  // STREAM GZIP COMPRESSION
   async function compressBuffer(arrayBuffer) {
     if (typeof CompressionStream === 'undefined') {
       return { buffer: arrayBuffer, compressed: false };
@@ -260,7 +258,31 @@
     return new Response(ds.readable).arrayBuffer();
   }
 
-  // PARALLEL SHARD UPLOADER & DOWNLOADER
+  // TELEGRAM ENGINE HELPERS
+  function getWorkerBase() {
+    return (tgConfig.workerUrl || '').trim().replace(/\/+$/, '');
+  }
+
+  function getTgHeaders() {
+    const headers = {};
+    if (tgConfig.botToken) headers['X-TG-Token'] = tgConfig.botToken.trim();
+    if (tgConfig.chatId) headers['X-TG-Chat'] = tgConfig.chatId.trim();
+    return headers;
+  }
+
+  function updateEngineStatusUI() {
+    const configured = Boolean(getWorkerBase());
+    $('setupBanner').classList.toggle('hidden', configured);
+    const pill = $('syncDot');
+    if (configured) {
+      pill.classList.remove('warn');
+      $('syncText').textContent = 'TG Live';
+    } else {
+      pill.classList.add('warn');
+      $('syncText').textContent = 'Setup TG';
+    }
+  }
+
   function setTransferProgress(visible, title = '', pct = 0) {
     const banner = $('transferBanner');
     if (!visible) {
@@ -273,64 +295,118 @@
     $('transferFill').style.width = `${Math.min(100, Math.max(0, pct))}%`;
   }
 
-  async function uploadShardedPayload(itemId, rawBuffer, label) {
-    setTransferProgress(true, `Compressing ${label}...`, 8);
-    const { buffer, compressed } = await compressBuffer(rawBuffer);
-    const b64 = arrayBufferToBase64(buffer);
-    const totalChunks = Math.max(1, Math.ceil(b64.length / SHARD_SIZE));
-    let completed = 0;
+  async function uploadSingleShardToTelegram(blobSlice, shardName, caption) {
+    const workerUrl = getWorkerBase();
+    if (!workerUrl) throw new Error('Configure Telegram Engine in Settings (⚙) first');
 
-    const tasks = Array.from({ length: totalChunks }, (_, idx) => async () => {
-      const slice = b64.slice(idx * SHARD_SIZE, (idx + 1) * SHARD_SIZE);
-      await rtdbPut(`vault/${currentUser.key}/chunks/${itemId}/c_${idx}`, slice);
-      completed++;
-      const pct = 12 + (completed / totalChunks) * 86;
-      setTransferProgress(true, `Sharding ${label} (${completed}/${totalChunks})...`, pct);
-    });
+    while (true) {
+      const form = new FormData();
+      form.append('document', blobSlice, shardName);
+      form.append('caption', caption);
 
-    // Worker pool
-    let cursor = 0;
-    const workers = Array.from({ length: Math.min(PARALLEL_WORKERS, tasks.length) }, async () => {
-      while (cursor < tasks.length) {
-        const current = cursor++;
-        await tasks[current]();
+      const res = await fetch(`${workerUrl}/upload`, {
+        method: 'POST',
+        headers: getTgHeaders(),
+        body: form
+      });
+      const data = await res.json();
+
+      if (res.status === 429 && data.retryAfter) {
+        await sleep((data.retryAfter + 1) * 1000);
+        continue;
       }
-    });
-    await Promise.all(workers);
+
+      if (!res.ok || !data.ok) {
+        throw new Error(data.error || `Telegram upload failed (${res.status})`);
+      }
+
+      return {
+        fileId: data.fileId,
+        messageId: data.messageId,
+        bytes: blobSlice.size
+      };
+    }
+  }
+
+  async function uploadBufferToTelegram(itemId, rawBuffer, label) {
+    setTransferProgress(true, `Preparing ${label}...`, 6);
+    const { buffer, compressed } = await compressBuffer(rawBuffer);
+    const totalBytes = buffer.byteLength;
+    const totalShards = Math.max(1, Math.ceil(totalBytes / TG_SHARD_BYTES));
+    const tgShards = [];
+
+    for (let idx = 0; idx < totalShards; idx++) {
+      const start = idx * TG_SHARD_BYTES;
+      const end = Math.min(totalBytes, start + TG_SHARD_BYTES);
+      const slice = new Blob([buffer.slice(start, end)], { type: 'application/octet-stream' });
+      const shardName = `${itemId}_part${idx + 1}of${totalShards}.omt`;
+      const caption = `OnlyMeTed | ${currentUser.handle} | ${label} [${idx + 1}/${totalShards}]`;
+
+      setTransferProgress(
+        true,
+        `Streaming to Telegram (${idx + 1}/${totalShards})...`,
+        10 + (idx / totalShards) * 85
+      );
+
+      const shardRef = await uploadSingleShardToTelegram(slice, shardName, caption);
+      tgShards.push(shardRef);
+
+      // Gentle pacing to avoid Telegram per-chat 429 rate limits on multi-part uploads
+      if (idx < totalShards - 1) await sleep(650);
+    }
 
     return {
       compressed,
-      compressedBytes: buffer.byteLength,
-      chunkCount: totalChunks
+      storedBytes: totalBytes,
+      tgShards
     };
   }
 
-  async function downloadShardedPayload(meta) {
+  async function downloadBufferFromTelegram(meta) {
     const cacheKey = `${currentUser.key}:${meta.id}`;
     const cached = await edgeCache.get(cacheKey);
     if (cached) return cached;
 
-    const total = meta.chunkCount || 1;
+    const workerUrl = getWorkerBase();
+    if (!workerUrl) throw new Error('Configure Telegram Engine in Settings (⚙) first');
+
+    const shards = meta.tgShards || [];
+    if (!shards.length) throw new Error('No Telegram shards linked to this entry');
+
     let completed = 0;
-    const parts = new Array(total);
-    setTransferProgress(true, `Fetching ${meta.title}...`, 10);
+    const buffers = new Array(shards.length);
+    setTransferProgress(true, `Fetching ${meta.title} from Telegram...`, 8);
 
     let cursor = 0;
-    const workers = Array.from({ length: Math.min(PARALLEL_WORKERS, total) }, async () => {
-      while (cursor < total) {
+    const workers = Array.from({ length: Math.min(PARALLEL_DOWNLOADS, shards.length) }, async () => {
+      while (cursor < shards.length) {
         const idx = cursor++;
-        const shard = await rtdbGet(`vault/${currentUser.key}/chunks/${meta.id}/c_${idx}`);
-        if (shard == null) throw new Error(`Missing shard ${idx}`);
-        parts[idx] = shard;
+        const shard = shards[idx];
+        const res = await fetch(
+          `${workerUrl}/download?file_id=${encodeURIComponent(shard.fileId)}`,
+          { headers: getTgHeaders() }
+        );
+        if (!res.ok) {
+          let errMsg = `Shard ${idx + 1} download failed (${res.status})`;
+          try {
+            const j = await res.json();
+            if (j.error) errMsg = j.error;
+          } catch {}
+          throw new Error(errMsg);
+        }
+        buffers[idx] = await res.arrayBuffer();
         completed++;
-        setTransferProgress(true, `Reassembling (${completed}/${total})...`, 10 + (completed / total) * 85);
+        setTransferProgress(
+          true,
+          `Downloading (${completed}/${shards.length})...`,
+          10 + (completed / shards.length) * 85
+        );
       }
     });
     await Promise.all(workers);
 
-    const joinedB64 = parts.join('');
-    const compressedBuf = base64ToArrayBuffer(joinedB64);
-    const rawBuf = await decompressBuffer(compressedBuf, meta.compressed);
+    const joined = await new Blob(buffers).arrayBuffer();
+    const rawBuf = await decompressBuffer(joined, meta.compressed);
     setTransferProgress(false);
 
     await edgeCache.set(cacheKey, rawBuf);
@@ -410,12 +486,13 @@
   function enterWorkspace() {
     $('authView').classList.add('hidden');
     $('appView').classList.remove('hidden');
-    syncVault();
+    syncVault(true);
   }
 
   function signOut() {
     currentUser = null;
     itemsMap = {};
+    tgConfig = { workerUrl: '', botToken: '', chatId: '' };
     localStorage.removeItem(SESSION_KEY);
     $('appView').classList.add('hidden');
     $('authView').classList.remove('hidden');
@@ -429,11 +506,21 @@
     if (!currentUser) return;
     $('syncText').textContent = 'Syncing';
     try {
-      const data = await rtdbGet(`vault/${currentUser.key}/meta`);
-      itemsMap = data || {};
-      $('syncText').textContent = 'Live';
+      const [metaData, cfgData] = await Promise.all([
+        rtdbGet(`vault/${currentUser.key}/meta`),
+        rtdbGet(`vault/${currentUser.key}/tgConfig`)
+      ]);
+      itemsMap = metaData || {};
+      if (cfgData) {
+        tgConfig = {
+          workerUrl: cfgData.workerUrl || '',
+          botToken: cfgData.botToken || '',
+          chatId: cfgData.chatId || ''
+        };
+      }
+      updateEngineStatusUI();
       renderVault();
-      if (!silent) showToast('Vault synced');
+      if (!silent) showToast('Index synced');
     } catch (err) {
       $('syncText').textContent = 'Offline';
       showToast(`Sync issue: ${err.message}`);
@@ -472,14 +559,21 @@
     return true;
   }
 
+  function escapeHtml(str) {
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
   function renderVault() {
     const allItems = Object.values(itemsMap);
-    const totalLogical = allItems.reduce((acc, it) => acc + (it.size || 0), 0);
-    const totalCloud = allItems.reduce((acc, it) => acc + (it.compressedSize || it.size || 0), 0);
-    const savedPct = totalLogical > 0 ? Math.max(0, Math.round((1 - totalCloud / totalLogical) * 100)) : 0;
+    const totalTgBytes = allItems.reduce((acc, it) => acc + (it.size || 0), 0);
+    const approxMetaBytes = JSON.stringify(itemsMap).length;
 
     $('vaultStats').textContent =
-      `${allItems.length} item${allItems.length === 1 ? '' : 's'} • ${formatBytes(totalLogical)} (${savedPct}% GZIP saved)`;
+      `${allItems.length} item${allItems.length === 1 ? '' : 's'} • ${formatBytes(totalTgBytes)} on Telegram • ${formatBytes(approxMetaBytes)} RTDB index`;
 
     const filtered = allItems
       .filter(matchesFilter)
@@ -487,7 +581,6 @@
 
     const grid = $('vaultGrid');
     grid.innerHTML = '';
-
     $('emptyState').classList.toggle('hidden', filtered.length > 0);
 
     filtered.forEach((item) => {
@@ -496,9 +589,10 @@
       card.setAttribute('role', 'button');
       card.setAttribute('tabindex', '0');
 
+      const shardCount = (item.tgShards || []).length;
       const tagsHtml = (item.tags || [])
         .slice(0, 2)
-        .map((t) => `<span class="mini-tag">#${t}</span>`)
+        .map((t) => `<span class="mini-tag">#${escapeHtml(t)}</span>`)
         .join('');
 
       card.innerHTML = `
@@ -508,6 +602,7 @@
             <div class="item-badges-right">
               ${item.pinned ? '<span class="mini-tag pin">★</span>' : ''}
               ${item.encrypted ? '<span class="mini-tag lock">AES</span>' : ''}
+              ${shardCount > 0 ? `<span class="mini-tag tg">TG×${shardCount}</span>` : ''}
               ${tagsHtml}
             </div>
           </div>
@@ -525,15 +620,62 @@
     });
   }
 
-  function escapeHtml(str) {
-    return String(str)
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;');
+  // TELEGRAM SETTINGS MODAL
+  function openSettingsModal() {
+    $('cfgWorkerUrl').value = tgConfig.workerUrl || '';
+    $('cfgBotToken').value = tgConfig.botToken || '';
+    $('cfgChatId').value = tgConfig.chatId || '';
+    $('settingsModal').classList.remove('hidden');
   }
 
-  // STORE ACTIONS (FILES, NOTES, LINKS, CLIPBOARD)
+  async function saveEngineConfig() {
+    const nextCfg = {
+      workerUrl: $('cfgWorkerUrl').value.trim().replace(/\/+$/, ''),
+      botToken: $('cfgBotToken').value.trim(),
+      chatId: $('cfgChatId').value.trim()
+    };
+    if (!nextCfg.workerUrl) {
+      showToast('Enter your Cloudflare Worker URL');
+      return;
+    }
+    try {
+      await rtdbPut(`vault/${currentUser.key}/tgConfig`, nextCfg);
+      tgConfig = nextCfg;
+      updateEngineStatusUI();
+      $('settingsModal').classList.add('hidden');
+      showToast('Telegram engine synced to all devices');
+    } catch (err) {
+      showToast(`Save failed: ${err.message}`);
+    }
+  }
+
+  async function testEnginePing() {
+    const workerUrl = $('cfgWorkerUrl').value.trim().replace(/\/+$/, '');
+    if (!workerUrl) {
+      showToast('Enter Worker URL first');
+      return;
+    }
+    const headers = {};
+    const tok = $('cfgBotToken').value.trim();
+    const chat = $('cfgChatId').value.trim();
+    if (tok) headers['X-TG-Token'] = tok;
+    if (chat) headers['X-TG-Chat'] = chat;
+
+    try {
+      showToast('Pinging Telegram Bot API...');
+      const res = await fetch(`${workerUrl}/ping`, { headers });
+      const data = await res.json();
+      if (data.ok && data.result?.username) {
+        showToast(`Connected: @${data.result.username}`);
+      } else {
+        showToast(`Ping error: ${data.error || data.description || 'Check token'}`);
+      }
+    } catch (err) {
+      showToast(`Worker unreachable: ${err.message}`);
+    }
+  }
+
+  // STORE ACTIONS
   function parseTags() {
     return $('itemTags').value
       .split(',')
@@ -544,6 +686,12 @@
   async function storeFiles(fileList) {
     const files = Array.from(fileList || []);
     if (!files.length) return;
+    if (!getWorkerBase()) {
+      openSettingsModal();
+      showToast('Configure Telegram Engine first');
+      return;
+    }
+
     $('createModal').classList.add('hidden');
     const tags = parseTags();
 
@@ -551,7 +699,7 @@
       try {
         const id = generateId();
         const rawBuffer = await file.arrayBuffer();
-        const { compressed, compressedBytes, chunkCount } = await uploadShardedPayload(id, rawBuffer, file.name);
+        const { compressed, storedBytes, tgShards } = await uploadBufferToTelegram(id, rawBuffer, file.name);
 
         const meta = {
           id,
@@ -559,13 +707,13 @@
           title: file.name,
           mime: file.type || 'application/octet-stream',
           size: file.size,
-          compressedSize: compressedBytes,
+          storedBytes,
           compressed,
-          chunkCount,
+          tgShards,
           encrypted: false,
           pinned: false,
           tags,
-          snippet: `${file.type || 'Binary File'} • ${chunkCount} shard${chunkCount > 1 ? 's' : ''}`,
+          snippet: `${file.type || 'Binary File'} • ${tgShards.length} TG shard${tgShards.length > 1 ? 's' : ''}`,
           createdAt: Date.now()
         };
 
@@ -573,7 +721,7 @@
         await edgeCache.set(`${currentUser.key}:${id}`, rawBuffer);
         itemsMap[id] = meta;
         renderVault();
-        showToast(`Stored ${file.name}`);
+        showToast(`Stored ${file.name} on Telegram`);
       } catch (err) {
         showToast(`Failed ${file.name}: ${err.message}`);
       }
@@ -584,6 +732,12 @@
   }
 
   async function storeNote() {
+    if (!getWorkerBase()) {
+      openSettingsModal();
+      showToast('Configure Telegram Engine first');
+      return;
+    }
+
     const title = $('noteTitle').value.trim() || `Note ${new Date().toLocaleTimeString()}`;
     const body = $('noteBody').value;
     if (!body.trim()) {
@@ -603,7 +757,7 @@
       const tags = parseTags();
       const payloadText = isEncrypted ? await encryptText(body, pass) : body;
       const rawBuffer = new TextEncoder().encode(payloadText).buffer;
-      const { compressed, compressedBytes, chunkCount } = await uploadShardedPayload(id, rawBuffer, title);
+      const { compressed, storedBytes, tgShards } = await uploadBufferToTelegram(id, rawBuffer, `${title}.txt`);
 
       const meta = {
         id,
@@ -611,13 +765,13 @@
         title,
         mime: 'text/plain;charset=utf-8',
         size: rawBuffer.byteLength,
-        compressedSize: compressedBytes,
+        storedBytes,
         compressed,
-        chunkCount,
+        tgShards,
         encrypted: isEncrypted,
         pinned: false,
         tags,
-        snippet: isEncrypted ? 'Encrypted AES-256 payload' : body.slice(0, 120),
+        snippet: isEncrypted ? 'Encrypted AES-256 note on Telegram' : body.slice(0, 120),
         createdAt: Date.now()
       };
 
@@ -632,7 +786,7 @@
       $('encryptPass').value = '';
       $('itemTags').value = '';
       $('createModal').classList.add('hidden');
-      showToast(isEncrypted ? 'Encrypted note saved' : 'Note saved');
+      showToast(isEncrypted ? 'Encrypted note saved to Telegram' : 'Note saved to Telegram');
     } catch (err) {
       setTransferProgress(false);
       showToast(`Error: ${err.message}`);
@@ -658,9 +812,7 @@
         url,
         mime: 'text/uri-list',
         size: url.length,
-        compressedSize: url.length,
-        compressed: false,
-        chunkCount: 0,
+        tgShards: [],
         encrypted: false,
         pinned: false,
         tags,
@@ -676,7 +828,7 @@
       $('linkTitle').value = '';
       $('itemTags').value = '';
       $('createModal').classList.add('hidden');
-      showToast('Link bookmarked');
+      showToast('Bookmark saved');
     } catch (err) {
       showToast(`Error: ${err.message}`);
     }
@@ -705,7 +857,8 @@
     $('previewModal').classList.remove('hidden');
 
     const viewport = $('previewViewport');
-    viewport.innerHTML = '<div class="muted-sub">Loading from sharded cloud...</div>';
+    viewport.classList.remove('hidden');
+    viewport.innerHTML = '<div class="muted-sub">Streaming from Telegram CDN...</div>';
 
     try {
       if (item.kind === 'link') {
@@ -719,7 +872,7 @@
         return;
       }
 
-      const rawBuf = await downloadShardedPayload(item);
+      const rawBuf = await downloadBufferFromTelegram(item);
 
       if (item.encrypted) {
         viewport.classList.add('hidden');
@@ -729,7 +882,6 @@
         return;
       }
 
-      viewport.classList.remove('hidden');
       renderUnencryptedPayload(item, rawBuf);
     } catch (err) {
       setTransferProgress(false);
@@ -759,7 +911,7 @@
         <div style="text-align:center; display:flex; flex-direction:column; gap:12px;">
           <div style="font-size:38px;">📦</div>
           <div style="font-weight:650;">${escapeHtml(item.title)}</div>
-          <div class="muted-sub">${formatBytes(item.size || 0)} • Ready for instant download</div>
+          <div class="muted-sub">${formatBytes(item.size || 0)} • Reassembled from ${(item.tgShards || []).length} Telegram shard(s)</div>
         </div>
       `;
     }
@@ -814,7 +966,7 @@
       ? URL.createObjectURL(new Blob([activePlainText], { type: 'text/plain;charset=utf-8' }))
       : activeObjectUrl;
     if (!url) {
-      showToast('Wait for payload to finish loading');
+      showToast('Wait for Telegram stream to finish');
       return;
     }
     const a = document.createElement('a');
@@ -830,30 +982,39 @@
     if (!activeItem) return;
     if (!deleteConfirmArmed) {
       deleteConfirmArmed = true;
-      showToast('Tap delete again to permanently erase');
+      showToast('Tap delete again to erase from RTDB & Telegram');
       setTimeout(() => { deleteConfirmArmed = false; }, 3500);
       return;
     }
-    const targetId = activeItem.id;
+    const target = activeItem;
     closePreview();
     try {
+      const messageIds = (target.tgShards || []).map((s) => s.messageId).filter(Boolean);
+      const workerUrl = getWorkerBase();
+      if (workerUrl && messageIds.length) {
+        fetch(`${workerUrl}/delete`, {
+          method: 'POST',
+          headers: { ...getTgHeaders(), 'Content-Type': 'application/json' },
+          body: JSON.stringify({ messageIds })
+        }).catch(() => {});
+      }
       await Promise.all([
-        rtdbDelete(`vault/${currentUser.key}/meta/${targetId}`),
-        rtdbDelete(`vault/${currentUser.key}/chunks/${targetId}`),
-        edgeCache.del(`${currentUser.key}:${targetId}`)
+        rtdbDelete(`vault/${currentUser.key}/meta/${target.id}`),
+        edgeCache.del(`${currentUser.key}:${target.id}`)
       ]);
-      delete itemsMap[targetId];
+      delete itemsMap[target.id];
       renderVault();
-      showToast('Erased from cloud');
+      showToast('Erased from Vault & Telegram');
     } catch (err) {
       showToast(`Delete failed: ${err.message}`);
     }
   }
 
-  async function exportVaultManifest() {
+  function exportVaultManifest() {
     if (!currentUser) return;
     const payload = JSON.stringify({
       app: 'Only Me Ted',
+      storageEngine: 'Telegram Bot API Sharded Index',
       vault: currentUser.handle,
       exportedAt: new Date().toISOString(),
       items: itemsMap
@@ -867,10 +1028,9 @@
     a.click();
     a.remove();
     URL.revokeObjectURL(url);
-    showToast('Vault manifest exported');
+    showToast('Manifest exported');
   }
 
-  // CREATE MODAL TABS
   function openCreateModal(tab = 'files') {
     $('createModal').classList.remove('hidden');
     document.querySelectorAll('[data-create-tab]').forEach((el) => {
@@ -881,7 +1041,7 @@
     $('paneLink').classList.toggle('hidden', tab !== 'link');
   }
 
-  // EVENT BINDINGS
+  // BINDINGS
   bindDivButton($('tabLogin'), () => setAuthMode('login'));
   bindDivButton($('tabSignup'), () => setAuthMode('signup'));
   bindDivButton($('authSubmitBtn'), handleAuthSubmit);
@@ -891,6 +1051,12 @@
       if (e.key === 'Enter') handleAuthSubmit();
     });
   });
+
+  bindDivButton($('settingsBtn'), openSettingsModal);
+  bindDivButton($('openSetupFromBanner'), openSettingsModal);
+  bindDivButton($('closeSettingsBtn'), () => $('settingsModal').classList.add('hidden'));
+  bindDivButton($('saveEngineBtn'), saveEngineConfig);
+  bindDivButton($('testEngineBtn'), testEnginePing);
 
   bindDivButton($('syncNowBtn'), () => syncVault(false));
   bindDivButton($('exportVaultBtn'), exportVaultManifest);
@@ -946,7 +1112,7 @@
   bindDivButton($('previewDownloadBtn'), downloadActive);
   bindDivButton($('previewDeleteBtn'), deleteActive);
 
-  // GLOBAL DRAG & DROP ANYWHERE IN WORKSPACE
+  // DRAG & DROP
   let dragDepth = 0;
   window.addEventListener('dragenter', (e) => {
     if (!currentUser) return;
@@ -976,7 +1142,7 @@
     }
   });
 
-  // GLOBAL CTRL+V / CMD+V CLIPBOARD CAPTURE
+  // GLOBAL PASTE
   window.addEventListener('paste', (e) => {
     if (!currentUser) return;
     const tag = document.activeElement?.tagName;

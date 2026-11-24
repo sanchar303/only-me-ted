@@ -1,7 +1,7 @@
 :root {
   --bg-deep: #07090e;
-  --bg-surface: rgba(18, 22, 33, 0.72);
-  --bg-elevated: rgba(26, 32, 48, 0.84);
+  --bg-surface: rgba(18, 22, 33, 0.74);
+  --bg-elevated: rgba(26, 32, 48, 0.86);
   --silk-border: rgba(255, 255, 255, 0.09);
   --silk-highlight: rgba(255, 255, 255, 0.16);
   --text-main: #f3f6fc;
@@ -36,7 +36,16 @@ html, body {
   display: none !important;
 }
 
-/* AMBIENT SILK ORBS */
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  color: var(--accent-2);
+  background: rgba(56, 226, 198, 0.08);
+  padding: 2px 6px;
+  border-radius: 6px;
+}
+
+/* AMBIENT ORBS */
 .ambient-bg {
   position: fixed;
   inset: 0;
@@ -86,7 +95,6 @@ html, body {
   padding-bottom: env(safe-area-inset-bottom);
 }
 
-/* SILK NEUMORPHIC GLASS CARD */
 .silk-card {
   background: var(--bg-surface);
   backdrop-filter: blur(26px) saturate(145%);
@@ -149,6 +157,7 @@ html, body {
 .muted-sub {
   font-size: 13px;
   color: var(--text-muted);
+  line-height: 1.45;
 }
 
 /* CAPSULE TABS */
@@ -229,7 +238,7 @@ html, body {
   border-color: var(--accent);
 }
 
-/* CUSTOM DIV PILL BUTTONS */
+/* PILL BUTTONS */
 .pill-btn {
   display: flex;
   align-items: center;
@@ -240,7 +249,18 @@ html, body {
   font-size: 14px;
   font-weight: 650;
   cursor: pointer;
-  transition: transform 0.14s ease, box-shadow 0.2s ease, opacity 0.2s ease;
+  transition: transform 0.14s ease, box-shadow 0.2s ease;
+}
+
+.compact-pill {
+  padding: 9px 16px;
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.btn-row {
+  display: flex;
+  gap: 10px;
 }
 
 .pill-btn:active,
@@ -356,6 +376,17 @@ html, body {
   box-shadow: 0 0 8px var(--accent-2);
 }
 
+.sync-pill.warn {
+  color: #fbbf24;
+  background: rgba(251, 191, 36, 0.12);
+  border-color: rgba(251, 191, 36, 0.3);
+}
+
+.sync-pill.warn .dot {
+  background: #fbbf24;
+  box-shadow: 0 0 8px #fbbf24;
+}
+
 .stats-line {
   font-size: 12px;
   color: var(--text-muted);
@@ -368,7 +399,21 @@ html, body {
 .top-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 7px;
+}
+
+/* SETUP BANNER */
+.setup-banner {
+  margin: 0 18px 10px;
+  padding: 12px 16px;
+  border-radius: 20px;
+  background: rgba(108, 140, 255, 0.14);
+  border: 1px solid rgba(108, 140, 255, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 13px;
 }
 
 /* SEARCH & FILTER RIBBON */
@@ -506,6 +551,8 @@ html, body {
   display: flex;
   gap: 5px;
   align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .mini-tag {
@@ -525,6 +572,11 @@ html, body {
 .mini-tag.lock {
   color: var(--accent-2);
   background: rgba(56, 226, 198, 0.14);
+}
+
+.mini-tag.tg {
+  color: #60a5fa;
+  background: rgba(96, 165, 250, 0.14);
 }
 
 .item-title {
@@ -881,7 +933,7 @@ html, body {
   opacity: 0.72;
 }
 
-/* CUSTOM TOASTS */
+/* TOASTS */
 .toast-stack {
   position: fixed;
   top: calc(14px + env(safe-area-inset-top));
@@ -921,5 +973,10 @@ html, body {
   .dock-btn {
     padding: 10px 14px;
     font-size: 12px;
+  }
+  .icon-pill {
+    width: 34px;
+    height: 34px;
+    font-size: 14px;
   }
 }
