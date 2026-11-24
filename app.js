@@ -9,7 +9,7 @@
 
   const SHARD_BYTES = 18 * 1024 * 1024;
   const PARALLEL_STREAMS = 3;
-  const SESSION_KEY = 'onlymeted_session_v3';
+  const SESSION_KEY = 'onlymeted_session_v4';
 
   const ACCENT_THEMES = {
     indigo: { a1: '#6c8cff', a2: '#38e2c6' },
@@ -24,9 +24,22 @@
   let currentUser = null;
   let authMode = 'login';
   let itemsMap = {};
+  let directoryMap = {};
+  let inboxMap = {};
   let activeFilter = 'all';
   let activeFolder = 'all';
   let searchQuery = '';
+  let socialSearch = '';
+  let activeSocialTab = 'chats';
+  let activePeer = null;
+  let activeRoomId = null;
+  let threadMessages = {};
+  let pendingReply = null;
+  let pendingShareItem = null;
+
+  let inboxEventSource = null;
+  let threadEventSource = null;
+
   let activeItem = null;
   let activeObjectUrl = null;
   let activePlainText = '';
@@ -73,10 +86,14 @@
 
   function timeAgo(ts) {
     const diff = Math.max(1, Math.floor((Date.now() - ts) / 1000));
-    if (diff < 60) return `${diff}s ago`;
+    if (diff < 60) return 'just now';
     if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
     if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
     return new Date(ts).toLocaleDateString();
+  }
+
+  function formatClock(ts) {
+    return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   }
 
   function sanitizeKey(raw) {
@@ -85,6 +102,10 @@
 
   function generateId() {
     return `${Date.now().toString(36)}_${crypto.getRandomValues(new Uint32Array(1))[0].toString(36)}`;
+  }
+
+  function getRoomId(userA, userB) {
+    return [userA, userB].sort().join('__');
   }
 
   function sleep(ms) {
@@ -131,7 +152,7 @@
     if (!res.ok) throw new Error('Delete failed');
   }
 
-  // LOCAL EDGE CACHE FOR INSTANT ACCESS
+  // LOCAL EDGE CACHE
   const edgeCache = {
     dbPromise: null,
     open() {
@@ -181,7 +202,7 @@
     }
   };
 
-  // CRYPTOGRAPHY (AUTH HASHING & AES-256 NOTE ENCRYPTION)
+  // CRYPTOGRAPHY
   async function sha256Hex(str) {
     const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
     return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, '0')).join('');
@@ -283,12 +304,20 @@
     return new Response(ds.readable).arrayBuffer();
   }
 
-  // SILENT INFINITE CLOUD BLOB RELAY
+  // SILENT CLOUD BLOB RELAY & HUMAN-READABLE TELEGRAM CHAT LOGGER
   function relayHeaders() {
     return {
       'X-TG-Token': STORAGE_KEY,
       'X-TG-Chat': STORAGE_CHANNEL
     };
+  }
+
+  function logActivityToChannel(html, replyToMessageId = null) {
+    fetch(`${STORAGE_RELAY}/log`, {
+      method: 'POST',
+      headers: { ...relayHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ html, replyToMessageId })
+    }).catch(() => {});
   }
 
   function setTransferProgress(visible, title = '', pct = 0) {
@@ -345,7 +374,7 @@
       const end = Math.min(totalBytes, start + SHARD_BYTES);
       const slice = new Blob([buffer.slice(start, end)], { type: 'application/octet-stream' });
       const shardName = `${itemId}_p${idx + 1}.dat`;
-      const caption = `${currentUser.key}:${itemId}:${idx + 1}/${totalShards}`;
+      const caption = `${currentUser.displayName || currentUser.handle} (@${currentUser.key}) • ${label} [${idx + 1}/${totalShards}]`;
 
       setTransferProgress(
         true,
@@ -417,6 +446,55 @@
     }).catch(() => {});
   }
 
+  // PUBLIC DIRECTORY & LIVE MEMBER COUNTER
+  async function refreshDirectory() {
+    try {
+      const dir = await indexGet('directory');
+      directoryMap = dir || {};
+      updateMemberCountUI();
+      if (!$('socialModal').classList.contains('hidden')) {
+        renderPeopleDirectory();
+      }
+      return directoryMap;
+    } catch {
+      return directoryMap;
+    }
+  }
+
+  function updateMemberCountUI() {
+    const count = Object.keys(directoryMap).length;
+    const authLabel = count === 1 ? '1 Member Joined' : `${count} Members Joined`;
+    const topLabel = count === 1 ? '1 Member' : `${count} Members`;
+    $('authMemberCount').textContent = authLabel;
+    $('topMemberCount').textContent = topLabel;
+    $('socialMemberSubtitle').textContent = `${count} active account${count === 1 ? '' : 's'}`;
+  }
+
+  async function publishPublicDirectoryEntry(userObj, isNewSignup = false) {
+    const entry = {
+      key: userObj.key,
+      handle: userObj.handle,
+      displayName: userObj.displayName || userObj.handle,
+      bio: userObj.bio || '',
+      avatarData: userObj.avatarData || '',
+      theme: userObj.theme || 'indigo',
+      joinedAt: userObj.joinedAt || Date.now(),
+      lastSeen: Date.now()
+    };
+    await indexPut(`directory/${userObj.key}`, entry);
+    directoryMap[userObj.key] = entry;
+    updateMemberCountUI();
+
+    if (isNewSignup) {
+      const totalMembers = Object.keys(directoryMap).length;
+      const html =
+        `✨ <b>New Account Created</b>\n` +
+        `👤 <b>${escapeHtml(entry.displayName)}</b> (<code>@${escapeHtml(entry.key)}</code>)\n` +
+        `📊 Total Accounts: <b>${totalMembers}</b>`;
+      logActivityToChannel(html);
+    }
+  }
+
   // THEME & PROFILE UI
   function applyTheme(themeKey) {
     const palette = ACCENT_THEMES[themeKey] || ACCENT_THEMES.indigo;
@@ -483,6 +561,7 @@
         }
         const salt = randomHex(16);
         const hash = await sha256Hex(`${salt}:${pass}`);
+        const now = Date.now();
         const profile = {
           handle,
           displayName: handle,
@@ -491,7 +570,7 @@
           avatarData: '',
           salt,
           hash,
-          createdAt: Date.now()
+          createdAt: now
         };
         await indexPut(`users/${key}`, profile);
         currentUser = {
@@ -500,8 +579,11 @@
           displayName: profile.displayName,
           bio: profile.bio,
           theme: profile.theme,
-          avatarData: ''
+          avatarData: '',
+          joinedAt: now
         };
+        await refreshDirectory();
+        await publishPublicDirectoryEntry(currentUser, true);
         showToast('Account created');
       } else {
         if (!existing) {
@@ -521,8 +603,10 @@
           displayName: existing.displayName || existing.handle || handle,
           bio: existing.bio || '',
           theme: existing.theme || 'indigo',
-          avatarData: existing.avatarData || ''
+          avatarData: existing.avatarData || '',
+          joinedAt: existing.createdAt || Date.now()
         };
+        publishPublicDirectoryEntry(currentUser, false).catch(() => {});
       }
 
       localStorage.setItem(SESSION_KEY, JSON.stringify({ key: currentUser.key, handle: currentUser.handle }));
@@ -538,28 +622,45 @@
     $('appView').classList.remove('hidden');
     renderUserProfileHeader();
     syncVault(true);
+    startInboxStream();
+  }
+
+  function stopSocialStreams() {
+    if (inboxEventSource) {
+      inboxEventSource.close();
+      inboxEventSource = null;
+    }
+    if (threadEventSource) {
+      threadEventSource.close();
+      threadEventSource = null;
+    }
   }
 
   function signOut() {
+    stopSocialStreams();
     currentUser = null;
     itemsMap = {};
+    inboxMap = {};
+    activePeer = null;
+    activeRoomId = null;
     localStorage.removeItem(SESSION_KEY);
     applyTheme('indigo');
     $('appView').classList.add('hidden');
     $('authView').classList.remove('hidden');
     $('authPassword').value = '';
     setAuthMode('login');
+    refreshDirectory();
     showToast('Signed out');
   }
 
   // VAULT SYNC & RENDER
   async function syncVault(silent = false) {
     if (!currentUser) return;
-    $('syncText').textContent = 'Syncing';
     try {
       const [metaData, profileData] = await Promise.all([
         indexGet(`vault/${currentUser.key}/meta`),
-        indexGet(`users/${currentUser.key}`)
+        indexGet(`users/${currentUser.key}`),
+        refreshDirectory()
       ]);
       itemsMap = metaData || {};
       if (profileData) {
@@ -567,13 +668,13 @@
         currentUser.bio = profileData.bio || '';
         currentUser.theme = profileData.theme || 'indigo';
         currentUser.avatarData = profileData.avatarData || '';
+        currentUser.joinedAt = profileData.createdAt || currentUser.joinedAt;
         renderUserProfileHeader();
+        publishPublicDirectoryEntry(currentUser, false).catch(() => {});
       }
-      $('syncText').textContent = 'Synced';
       renderVault();
-      if (!silent) showToast('Vault up to date');
+      if (!silent) showToast('Vault & community synced');
     } catch {
-      $('syncText').textContent = 'Offline';
       showToast('Could not refresh right now');
     }
   }
@@ -597,7 +698,7 @@
     ).sort();
 
     const bar = $('folderBar');
-    if (folders.length <= 1 && folders[0] === 'General') {
+    if (folders.length <= 1 && (folders[0] === 'General' || folders.length === 0)) {
       bar.classList.add('hidden');
       activeFolder = 'all';
       return;
@@ -704,6 +805,545 @@
       bindDivButton(card, () => openPreview(item));
       grid.appendChild(card);
     });
+  }
+
+  // REAL-TIME SOCIAL INBOX & DIRECT MESSAGING
+  function applySsePatch(targetObj, path, data) {
+    if (path === '/' || !path) {
+      Object.keys(targetObj).forEach((k) => delete targetObj[k]);
+      if (data && typeof data === 'object') Object.assign(targetObj, data);
+      return;
+    }
+    const parts = path.split('/').filter(Boolean);
+    let ref = targetObj;
+    for (let i = 0; i < parts.length - 1; i++) {
+      if (!ref[parts[i]] || typeof ref[parts[i]] !== 'object') ref[parts[i]] = {};
+      ref = ref[parts[i]];
+    }
+    const leaf = parts[parts.length - 1];
+    if (data === null) {
+      delete ref[leaf];
+    } else if (typeof data === 'object' && !Array.isArray(data) && ref[leaf] && typeof ref[leaf] === 'object') {
+      Object.assign(ref[leaf], data);
+    } else {
+      ref[leaf] = data;
+    }
+  }
+
+  function startInboxStream() {
+    if (!currentUser) return;
+    if (inboxEventSource) inboxEventSource.close();
+
+    const url = `${INDEX_BASE}/inbox/${currentUser.key}.json`;
+    inboxEventSource = new EventSource(url);
+
+    const handleEvent = (e) => {
+      try {
+        const packet = JSON.parse(e.data);
+        applySsePatch(inboxMap, packet.path, packet.data);
+        updateUnreadBadges();
+        if (!$('socialModal').classList.contains('hidden') && $('chatThreadView').classList.contains('hidden')) {
+          renderInboxList();
+        }
+      } catch {}
+    };
+
+    inboxEventSource.addEventListener('put', handleEvent);
+    inboxEventSource.addEventListener('patch', handleEvent);
+  }
+
+  function updateUnreadBadges() {
+    const totalUnread = Object.values(inboxMap).reduce((sum, conv) => sum + (Number(conv.unreadCount) || 0), 0);
+    ['unreadTotalBadge', 'dockUnreadBadge'].forEach((id) => {
+      const badge = $(id);
+      if (totalUnread > 0) {
+        badge.textContent = totalUnread > 99 ? '99+' : String(totalUnread);
+        badge.classList.remove('hidden');
+      } else {
+        badge.classList.add('hidden');
+      }
+    });
+  }
+
+  function openSocialHub(tab = 'chats', preselectShareItem = null) {
+    pendingShareItem = preselectShareItem;
+    $('socialModal').classList.remove('hidden');
+    $('chatThreadView').classList.add('hidden');
+    $('socialHubView').classList.remove('hidden');
+    if (threadEventSource) {
+      threadEventSource.close();
+      threadEventSource = null;
+    }
+    activePeer = null;
+    activeRoomId = null;
+
+    if (pendingShareItem) {
+      showToast(`Choose a person to send "${pendingShareItem.title}"`);
+      switchSocialTab('people');
+    } else {
+      switchSocialTab(tab);
+    }
+    refreshDirectory();
+  }
+
+  function switchSocialTab(tab) {
+    activeSocialTab = tab;
+    $('tabSocialChats').classList.toggle('active', tab === 'chats');
+    $('tabSocialPeople').classList.toggle('active', tab === 'people');
+    $('inboxListPane').classList.toggle('hidden', tab !== 'chats');
+    $('peopleListPane').classList.toggle('hidden', tab !== 'people');
+    if (tab === 'chats') renderInboxList();
+    else renderPeopleDirectory();
+  }
+
+  function renderAvatarHtml(person, extraClass = '') {
+    const name = person.displayName || person.peerName || person.handle || 'U';
+    const initial = name.charAt(0).toUpperCase();
+    const avatar = person.avatarData || person.peerAvatar || '';
+    if (avatar) {
+      return `<div class="avatar-trigger ${extraClass}"><img class="avatar-img" src="${avatar}" alt="" /></div>`;
+    }
+    return `<div class="avatar-trigger ${extraClass}"><span>${escapeHtml(initial)}</span></div>`;
+  }
+
+  function renderInboxList() {
+    const list = $('inboxListPane');
+    const q = socialSearch.toLowerCase();
+    const convs = Object.values(inboxMap)
+      .filter((c) => {
+        if (!q) return true;
+        return `${c.peerName || ''} ${c.peerKey || ''} ${c.lastText || ''}`.toLowerCase().includes(q);
+      })
+      .sort((a, b) => (b.lastAt || 0) - (a.lastAt || 0));
+
+    if (!convs.length) {
+      list.innerHTML = `<div class="empty-state"><p>No messages yet. Switch to <strong>All People</strong> to message anyone.</p></div>`;
+      return;
+    }
+
+    list.innerHTML = '';
+    convs.forEach((conv) => {
+      const peerObj = directoryMap[conv.peerKey] || {
+        key: conv.peerKey,
+        handle: conv.peerKey,
+        displayName: conv.peerName || conv.peerKey,
+        avatarData: conv.peerAvatar || ''
+      };
+      const row = document.createElement('div');
+      row.className = 'person-row';
+      row.setAttribute('role', 'button');
+      row.setAttribute('tabindex', '0');
+
+      const unread = Number(conv.unreadCount) || 0;
+      row.innerHTML = `
+        <div class="person-left">
+          ${renderAvatarHtml(peerObj, 'small-avatar')}
+          <div class="person-meta">
+            <div class="person-name-line">${escapeHtml(peerObj.displayName || peerObj.key)}</div>
+            <div class="person-sub">${escapeHtml(conv.lastText || 'Start chatting')}</div>
+          </div>
+        </div>
+        <div class="person-right">
+          <span style="font-size:10px; color:var(--text-muted);">${conv.lastAt ? timeAgo(conv.lastAt) : ''}</span>
+          ${unread > 0 ? `<span class="mini-tag" style="background:var(--danger); color:#fff;">${unread}</span>` : ''}
+        </div>
+      `;
+      bindDivButton(row, () => openConversation(peerObj));
+      list.appendChild(row);
+    });
+  }
+
+  function renderPeopleDirectory() {
+    const list = $('peopleListPane');
+    const q = socialSearch.toLowerCase();
+    const people = Object.values(directoryMap)
+      .filter((p) => p.key !== currentUser.key)
+      .filter((p) => {
+        if (!q) return true;
+        return `${p.displayName || ''} ${p.key || ''} ${p.bio || ''}`.toLowerCase().includes(q);
+      })
+      .sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0));
+
+    if (!people.length) {
+      list.innerHTML = `<div class="empty-state"><p>No other members found yet. Share Only Me Ted with friends so they can join!</p></div>`;
+      return;
+    }
+
+    list.innerHTML = '';
+    people.forEach((person) => {
+      const row = document.createElement('div');
+      row.className = 'person-row';
+      row.setAttribute('role', 'button');
+      row.setAttribute('tabindex', '0');
+      row.innerHTML = `
+        <div class="person-left">
+          ${renderAvatarHtml(person, 'small-avatar')}
+          <div class="person-meta">
+            <div class="person-name-line">
+              <span>${escapeHtml(person.displayName || person.handle)}</span>
+              <span style="font-size:11px; color:var(--text-muted); font-weight:500;">@${escapeHtml(person.key)}</span>
+            </div>
+            <div class="person-sub">${escapeHtml(person.bio || 'Unlimited Cloud Member')}</div>
+          </div>
+        </div>
+        <div class="person-right">
+          <span class="pill-btn primary-pill compact-pill">${pendingShareItem ? 'Send Here' : 'Message'}</span>
+        </div>
+      `;
+      bindDivButton(row, () => openConversation(person));
+      list.appendChild(row);
+    });
+  }
+
+  async function openConversation(peer) {
+    activePeer = peer;
+    activeRoomId = getRoomId(currentUser.key, peer.key);
+    threadMessages = {};
+    pendingReply = null;
+    $('replyQuoteBar').classList.add('hidden');
+    $('chatVaultPicker').classList.add('hidden');
+
+    $('socialHubView').classList.add('hidden');
+    $('chatThreadView').classList.remove('hidden');
+
+    const peerName = peer.displayName || peer.handle || peer.key;
+    $('threadPeerName').textContent = peerName;
+    $('threadPeerSub').textContent = `@${peer.key}${peer.bio ? ` • ${peer.bio}` : ''}`;
+    $('threadPeerInitial').textContent = peerName.charAt(0).toUpperCase();
+
+    if (peer.avatarData) {
+      $('threadPeerAvatarImg').src = peer.avatarData;
+      $('threadPeerAvatarImg').classList.remove('hidden');
+      $('threadPeerInitial').classList.add('hidden');
+    } else {
+      $('threadPeerAvatarImg').classList.add('hidden');
+      $('threadPeerInitial').classList.remove('hidden');
+    }
+
+    // Clear unread count for this peer
+    if (inboxMap[peer.key]?.unreadCount) {
+      inboxMap[peer.key].unreadCount = 0;
+      updateUnreadBadges();
+      indexPatch(`inbox/${currentUser.key}/${peer.key}`, { unreadCount: 0 }).catch(() => {});
+    }
+
+    // Start live stream for messages in this room
+    if (threadEventSource) threadEventSource.close();
+    const msgUrl = `${INDEX_BASE}/dms/${activeRoomId}/messages.json`;
+    threadEventSource = new EventSource(msgUrl);
+
+    const onMsgEvent = (e) => {
+      try {
+        const packet = JSON.parse(e.data);
+        applySsePatch(threadMessages, packet.path, packet.data);
+        renderThreadMessages();
+        if (inboxMap[peer.key]?.unreadCount) {
+          inboxMap[peer.key].unreadCount = 0;
+          updateUnreadBadges();
+          indexPatch(`inbox/${currentUser.key}/${peer.key}`, { unreadCount: 0 }).catch(() => {});
+        }
+      } catch {}
+    };
+
+    threadEventSource.addEventListener('put', onMsgEvent);
+    threadEventSource.addEventListener('patch', onMsgEvent);
+
+    // If user entered via "Share in DM" from a file preview, send that item immediately
+    if (pendingShareItem) {
+      const itemToShare = pendingShareItem;
+      pendingShareItem = null;
+      await sendSharedVaultItemInChat(itemToShare);
+    }
+  }
+
+  function renderThreadMessages() {
+    const stream = $('chatMessagesStream');
+    const msgs = Object.values(threadMessages).sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+
+    if (!msgs.length) {
+      stream.innerHTML = `<div class="empty-state"><p>Say hello or share any file from your vault with <strong>${escapeHtml(activePeer?.displayName || activePeer?.key || '')}</strong>.</p></div>`;
+      return;
+    }
+
+    stream.innerHTML = '';
+    msgs.forEach((m) => {
+      const isMine = m.from === currentUser.key;
+      const row = document.createElement('div');
+      row.className = `msg-row ${isMine ? 'mine' : 'theirs'}`;
+
+      const bubble = document.createElement('div');
+      bubble.className = 'msg-bubble';
+
+      if (m.replyTo) {
+        const qDiv = document.createElement('div');
+        qDiv.className = 'msg-quote';
+        qDiv.innerHTML = `<strong>${escapeHtml(m.replyTo.author)}</strong>: ${escapeHtml(m.replyTo.text)}`;
+        bubble.appendChild(qDiv);
+      }
+
+      if (m.text) {
+        const tDiv = document.createElement('div');
+        tDiv.textContent = m.text;
+        bubble.appendChild(tDiv);
+      }
+
+      if (m.attachment) {
+        const att = m.attachment;
+        const attBox = document.createElement('div');
+        attBox.className = 'msg-attachment';
+        attBox.innerHTML = `
+          <div class="att-top">
+            <span style="font-size:22px;">${getCategoryIcon(att)}</span>
+            <div>
+              <div class="att-title">${escapeHtml(att.title)}</div>
+              <div class="att-size">${formatBytes(att.size || 0)} • ${escapeHtml(att.kind)}</div>
+            </div>
+          </div>
+          <div class="att-actions">
+            <div class="att-btn" role="button" tabindex="0" data-att-open="1">Open</div>
+            <div class="att-btn" role="button" tabindex="0" data-att-save="1">＋ Save to Vault</div>
+          </div>
+        `;
+        bindDivButton(attBox.querySelector('[data-att-open]'), () => openPreview(att));
+        bindDivButton(attBox.querySelector('[data-att-save]'), () => cloneSharedAttachmentToVault(att));
+        bubble.appendChild(attBox);
+      }
+
+      row.appendChild(bubble);
+
+      const meta = document.createElement('div');
+      meta.className = 'msg-meta-line';
+      meta.innerHTML = `<span>${formatClock(m.createdAt || Date.now())}</span>`;
+
+      const replyBtn = document.createElement('span');
+      replyBtn.className = 'reply-trigger';
+      replyBtn.textContent = 'Reply';
+      bindDivButton(replyBtn, () => {
+        pendingReply = {
+          id: m.id,
+          author: isMine ? (currentUser.displayName || currentUser.handle) : (activePeer.displayName || activePeer.key),
+          text: (m.text || m.attachment?.title || 'Attachment').slice(0, 70)
+        };
+        $('replyQuoteAuthor').textContent = `Replying to ${pendingReply.author}`;
+        $('replyQuoteSnippet').textContent = pendingReply.text;
+        $('replyQuoteBar').classList.remove('hidden');
+        $('chatMessageInput').focus();
+      });
+      meta.appendChild(replyBtn);
+
+      row.appendChild(meta);
+      stream.appendChild(row);
+    });
+
+    stream.scrollTop = stream.scrollHeight;
+  }
+
+  async function cloneSharedAttachmentToVault(att) {
+    if (!currentUser) return;
+    try {
+      const newId = generateId();
+      const cloned = {
+        ...att,
+        id: newId,
+        folder: 'Shared with Me',
+        pinned: false,
+        sharedRef: true,
+        createdAt: Date.now()
+      };
+      await indexPut(`vault/${currentUser.key}/meta/${newId}`, cloned);
+      itemsMap[newId] = cloned;
+      renderVault();
+      showToast(`Saved "${att.title}" to your vault`);
+    } catch {
+      showToast('Could not save item');
+    }
+  }
+
+  async function sendChatPayload({ text = '', attachment = null, replyToShardMessageId = null }) {
+    if (!currentUser || !activePeer || !activeRoomId) return;
+    const cleanText = text.trim();
+    if (!cleanText && !attachment) return;
+
+    const msgId = generateId();
+    const now = Date.now();
+    const myName = currentUser.displayName || currentUser.handle;
+    const peerName = activePeer.displayName || activePeer.handle || activePeer.key;
+
+    const msgObj = {
+      id: msgId,
+      from: currentUser.key,
+      fromName: myName,
+      text: cleanText,
+      attachment: attachment || null,
+      replyTo: pendingReply || null,
+      createdAt: now
+    };
+
+    pendingReply = null;
+    $('replyQuoteBar').classList.add('hidden');
+    $('chatMessageInput').value = '';
+
+    const summaryPreview = attachment
+      ? `📎 ${attachment.title}${cleanText ? `: ${cleanText}` : ''}`
+      : cleanText;
+
+    // Optimistic local update
+    threadMessages[msgId] = msgObj;
+    renderThreadMessages();
+
+    try {
+      const existingPeerInbox = await indexGet(`inbox/${activePeer.key}/${currentUser.key}`).catch(() => null);
+      const nextUnread = (Number(existingPeerInbox?.unreadCount) || 0) + 1;
+
+      await Promise.all([
+        indexPut(`dms/${activeRoomId}/messages/${msgId}`, msgObj),
+        indexPut(`inbox/${currentUser.key}/${activePeer.key}`, {
+          peerKey: activePeer.key,
+          peerName,
+          peerAvatar: activePeer.avatarData || '',
+          lastText: `You: ${summaryPreview}`,
+          lastAt: now,
+          unreadCount: 0
+        }),
+        indexPut(`inbox/${activePeer.key}/${currentUser.key}`, {
+          peerKey: currentUser.key,
+          peerName: myName,
+          peerAvatar: currentUser.avatarData || '',
+          lastText: summaryPreview,
+          lastAt: now,
+          unreadCount: nextUnread
+        })
+      ]);
+
+      // Human-readable live chat log in your Telegram channel
+      let logHtml = `💬 <b>${escapeHtml(myName)}</b> ➔ <b>${escapeHtml(peerName)}</b>\n`;
+      if (attachment) {
+        logHtml += `📎 Shared <b>${escapeHtml(attachment.title)}</b> (${formatBytes(attachment.size || 0)})\n`;
+      }
+      if (cleanText) {
+        logHtml += `<blockquote>${escapeHtml(cleanText)}</blockquote>`;
+      }
+      logActivityToChannel(logHtml, replyToShardMessageId);
+    } catch {
+      showToast('Message failed to send');
+    }
+  }
+
+  async function sendSharedVaultItemInChat(item) {
+    if (item.encrypted) {
+      showToast('Encrypted notes cannot be shared directly');
+      return;
+    }
+    // Mark source item as sharedRef so deleting it later preserves the recipient's copy
+    if (!item.sharedRef && itemsMap[item.id]) {
+      itemsMap[item.id].sharedRef = true;
+      indexPatch(`vault/${currentUser.key}/meta/${item.id}`, { sharedRef: true }).catch(() => {});
+    }
+
+    const attachment = {
+      id: item.id,
+      kind: item.kind,
+      title: item.title,
+      mime: item.mime || 'application/octet-stream',
+      size: item.size || 0,
+      compressed: Boolean(item.compressed),
+      shards: item.shards || item.tgShards || [],
+      url: item.url || ''
+    };
+    const caption = $('chatMessageInput').value.trim();
+    await sendChatPayload({ text: caption, attachment });
+  }
+
+  async function handleDirectFileUploadInChat(file) {
+    if (!file || !activePeer) return;
+    try {
+      const id = generateId();
+      const rawBuffer = await file.arrayBuffer();
+      const { compressed, storedBytes, shards } = await uploadBufferToCloud(id, rawBuffer, file.name);
+      setTransferProgress(false);
+
+      const meta = {
+        id,
+        kind: 'file',
+        title: file.name,
+        folder: 'Chat Uploads',
+        accent: 'default',
+        mime: file.type || 'application/octet-stream',
+        size: file.size,
+        storedBytes,
+        compressed,
+        shards,
+        sharedRef: true,
+        encrypted: false,
+        pinned: false,
+        tags: ['shared'],
+        snippet: `Shared with ${activePeer.displayName || activePeer.key}`,
+        createdAt: Date.now()
+      };
+
+      await indexPut(`vault/${currentUser.key}/meta/${id}`, meta);
+      await edgeCache.set(`${currentUser.key}:${id}`, rawBuffer);
+      itemsMap[id] = meta;
+      renderVault();
+
+      const lastShardMsgId = shards[shards.length - 1]?.messageId || null;
+      const caption = $('chatMessageInput').value.trim();
+      await sendChatPayload({
+        text: caption,
+        attachment: {
+          id: meta.id,
+          kind: meta.kind,
+          title: meta.title,
+          mime: meta.mime,
+          size: meta.size,
+          compressed: meta.compressed,
+          shards: meta.shards
+        },
+        replyToShardMessageId: lastShardMsgId
+      });
+    } catch (err) {
+      setTransferProgress(false);
+      showToast(err.message || 'Upload failed');
+    }
+  }
+
+  function toggleChatVaultPicker() {
+    const drawer = $('chatVaultPicker');
+    if (!drawer.classList.contains('hidden')) {
+      drawer.classList.add('hidden');
+      return;
+    }
+
+    const list = $('vaultPickerList');
+    const shareable = Object.values(itemsMap)
+      .filter((it) => !it.encrypted)
+      .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+
+    if (!shareable.length) {
+      showToast('No unencrypted items in your vault yet');
+      return;
+    }
+
+    list.innerHTML = '';
+    shareable.forEach((it) => {
+      const row = document.createElement('div');
+      row.className = 'picker-item';
+      row.setAttribute('role', 'button');
+      row.setAttribute('tabindex', '0');
+      row.innerHTML = `
+        <span style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:72%;">
+          ${getCategoryIcon(it)} ${escapeHtml(it.title)}
+        </span>
+        <span style="color:var(--text-muted); font-size:11px;">${formatBytes(it.size || 0)}</span>
+      `;
+      bindDivButton(row, () => {
+        drawer.classList.add('hidden');
+        sendSharedVaultItemInChat(it);
+      });
+      list.appendChild(row);
+    });
+
+    drawer.classList.remove('hidden');
   }
 
   // CREATE / STORE ACTIONS
@@ -890,8 +1530,13 @@
   async function openPreview(item) {
     closePreview();
     activeItem = item;
+    const isOwned = Boolean(itemsMap[item.id]);
+    $('previewPinBtn').classList.toggle('hidden', !isOwned);
+    $('previewEditBtn').classList.toggle('hidden', !isOwned);
+    $('previewDeleteBtn').classList.toggle('hidden', !isOwned);
+
     $('previewTitle').textContent = item.title;
-    $('previewMeta').textContent = `${formatBytes(item.size || 0)} • ${item.folder || 'General'}`;
+    $('previewMeta').textContent = `${formatBytes(item.size || 0)} • ${item.folder || 'Shared'}`;
     $('previewPinBtn').style.color = item.pinned ? '#fbbf24' : '';
     $('previewModal').classList.remove('hidden');
 
@@ -1034,7 +1679,7 @@
           const rawBuffer = new TextEncoder().encode(payloadText).buffer;
           const oldShards = activeItem.shards || activeItem.tgShards || [];
           const { compressed, storedBytes, shards } = await uploadBufferToCloud(activeItem.id, rawBuffer, nextTitle);
-          eraseRemoteShards(oldShards);
+          if (!activeItem.sharedRef) eraseRemoteShards(oldShards);
 
           patch.size = rawBuffer.byteLength;
           patch.storedBytes = storedBytes;
@@ -1129,7 +1774,10 @@
     const target = activeItem;
     closePreview();
     try {
-      eraseRemoteShards(target.shards || target.tgShards || []);
+      // Only erase remote binary shards if this item has not been shared with another user
+      if (!target.sharedRef) {
+        eraseRemoteShards(target.shards || target.tgShards || []);
+      }
       await Promise.all([
         indexDelete(`vault/${currentUser.key}/meta/${target.id}`),
         edgeCache.del(`${currentUser.key}:${target.id}`)
@@ -1142,7 +1790,7 @@
     }
   }
 
-  // ACCOUNT CUSTOMIZATION & FULL ACCOUNT CONTROL
+  // ACCOUNT CUSTOMIZATION & FULL CONTROL
   function openAccountModal(tab = 'profile') {
     if (!currentUser) return;
     pendingAvatarData = undefined;
@@ -1168,7 +1816,6 @@
       d.classList.toggle('active', d.dataset.theme === selectedTheme);
     });
 
-    // Storage telemetry breakdown
     const allItems = Object.values(itemsMap);
     const totalBytes = allItems.reduce((a, b) => a + (b.size || 0), 0);
     const mediaCount = allItems.filter((i) => /^(image|video|audio)\//.test(i.mime || '')).length;
@@ -1241,6 +1888,7 @@
       currentUser.theme = selectedTheme;
       currentUser.avatarData = avatarData;
       renderUserProfileHeader();
+      await publishPublicDirectoryEntry(currentUser, false);
       $('accountModal').classList.add('hidden');
       showToast('Profile saved');
     } catch {
@@ -1284,7 +1932,9 @@
     try {
       const all = Object.values(itemsMap);
       for (const it of all) {
-        eraseRemoteShards(it.shards || it.tgShards || []);
+        if (!it.sharedRef) {
+          eraseRemoteShards(it.shards || it.tgShards || []);
+        }
         await edgeCache.del(`${currentUser.key}:${it.id}`);
       }
       await indexDelete(`vault/${currentUser.key}/meta`);
@@ -1344,13 +1994,18 @@
     try {
       const all = Object.values(itemsMap);
       for (const it of all) {
-        eraseRemoteShards(it.shards || it.tgShards || []);
+        if (!it.sharedRef) {
+          eraseRemoteShards(it.shards || it.tgShards || []);
+        }
         await edgeCache.del(`${currentUser.key}:${it.id}`);
       }
       await Promise.all([
         indexDelete(`vault/${currentUser.key}`),
+        indexDelete(`inbox/${currentUser.key}`),
+        indexDelete(`directory/${currentUser.key}`),
         indexDelete(`users/${currentUser.key}`)
       ]);
+      delete directoryMap[currentUser.key];
       $('accountModal').classList.add('hidden');
       signOut();
       showToast('Account permanently deleted');
@@ -1386,6 +2041,50 @@
   bindDivButton($('syncNowBtn'), () => syncVault(false));
   bindDivButton($('logoutBtn'), signOut);
 
+  // SOCIAL HUB & DM BINDINGS
+  bindDivButton($('memberCountBtn'), () => openSocialHub('people'));
+  bindDivButton($('chatHubBtn'), () => openSocialHub('chats'));
+  bindDivButton($('dockChatBtn'), () => openSocialHub('chats'));
+  bindDivButton($('closeSocialBtn'), () => $('socialModal').classList.add('hidden'));
+  bindDivButton($('closeThreadModalBtn'), () => $('socialModal').classList.add('hidden'));
+  bindDivButton($('backToHubBtn'), () => openSocialHub(activeSocialTab));
+
+  document.querySelectorAll('[data-social-tab]').forEach((tab) => {
+    bindDivButton(tab, () => switchSocialTab(tab.dataset.socialTab));
+  });
+
+  $('socialSearchInput').addEventListener('input', (e) => {
+    socialSearch = e.target.value;
+    if (activeSocialTab === 'chats') renderInboxList();
+    else renderPeopleDirectory();
+  });
+
+  bindDivButton($('cancelReplyBtn'), () => {
+    pendingReply = null;
+    $('replyQuoteBar').classList.add('hidden');
+  });
+
+  bindDivButton($('attachVaultBtn'), toggleChatVaultPicker);
+  bindDivButton($('closeVaultPickerBtn'), () => $('chatVaultPicker').classList.add('hidden'));
+
+  $('chatDirectFileInput').addEventListener('change', (e) => {
+    const file = e.target.files?.[0];
+    if (file) handleDirectFileUploadInChat(file);
+    e.target.value = '';
+  });
+
+  bindDivButton($('sendChatBtn'), () => {
+    sendChatPayload({ text: $('chatMessageInput').value });
+  });
+
+  $('chatMessageInput').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      sendChatPayload({ text: $('chatMessageInput').value });
+    }
+  });
+
+  // ACCOUNT MODAL BINDINGS
   document.querySelectorAll('[data-acc-tab]').forEach((tab) => {
     bindDivButton(tab, () => switchAccountTab(tab.dataset.accTab));
   });
@@ -1412,6 +2111,7 @@
   bindDivButton($('changePassBtn'), updateAccountPassword);
   bindDivButton($('deleteAccountBtn'), deleteAccountPermanently);
 
+  // SEARCH & FILTER BINDINGS
   $('searchInput').addEventListener('input', (e) => {
     searchQuery = e.target.value;
     $('clearSearchBtn').classList.toggle('hidden', !searchQuery);
@@ -1434,6 +2134,7 @@
     });
   });
 
+  // CREATE & PREVIEW BINDINGS
   bindDivButton($('openUploadBtn'), () => openCreateModal('files'));
   bindDivButton($('quickNoteBtn'), () => openCreateModal('note'));
   bindDivButton($('quickLinkBtn'), () => openCreateModal('link'));
@@ -1457,6 +2158,16 @@
 
   bindDivButton($('closePreviewBtn'), closePreview);
   bindDivButton($('unlockItemBtn'), handleDecrypt);
+  bindDivButton($('previewShareBtn'), () => {
+    if (!activeItem) return;
+    if (activeItem.encrypted) {
+      showToast('Encrypted notes cannot be shared directly');
+      return;
+    }
+    const toShare = { ...activeItem };
+    closePreview();
+    openSocialHub('people', toShare);
+  });
   bindDivButton($('previewPinBtn'), togglePinActive);
   bindDivButton($('previewEditBtn'), toggleItemCustomizeDrawer);
   bindDivButton($('saveItemEditBtn'), saveItemCustomizations);
@@ -1522,7 +2233,17 @@
     }
   });
 
-  // AUTO-RESTORE SESSION
+  // RECONNECT LIVE STREAMS WHEN RETURNING TO TAB / APP ON MOBILE
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && currentUser) {
+      startInboxStream();
+      if (activePeer) openConversation(activePeer);
+    }
+  });
+
+  // INITIALIZE PUBLIC MEMBER COUNT & RESTORE SESSION
+  refreshDirectory();
+
   try {
     const saved = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null');
     if (saved && saved.key) {

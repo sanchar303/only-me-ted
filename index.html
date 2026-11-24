@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="apple-mobile-web-app-title" content="Only Me Ted" />
-  <meta name="description" content="Only Me Ted — Personal Unlimited Cloud Vault" />
+  <meta name="description" content="Only Me Ted — Personal Unlimited Cloud & Social Vault" />
   <title>Only Me Ted</title>
   <link rel="icon" type="image/png" href="favicon.png" />
   <link rel="apple-touch-icon" href="favicon.png" />
@@ -25,9 +25,14 @@
     <section class="silk-card auth-card">
       <div class="brand-header">
         <img src="favicon.png" alt="Only Me Ted" class="brand-logo" onerror="this.style.display='none'" />
-        <div class="brand-badge">∞ UNLIMITED PERSONAL CLOUD</div>
+        <div class="badge-cluster">
+          <div class="brand-badge">∞ UNLIMITED CLOUD</div>
+          <div id="authMemberPill" class="member-count-pill">
+            <span class="pulse-dot"></span><span id="authMemberCount">Loading members...</span>
+          </div>
+        </div>
         <h1>Only Me Ted</h1>
-        <p class="muted-sub">Store everything. Instant access from anywhere.</p>
+        <p class="muted-sub">Store everything. Connect and share with anyone.</p>
       </div>
 
       <div class="capsule-tabs" role="tablist">
@@ -72,18 +77,22 @@
           <div class="app-title-row">
             <img src="favicon.png" alt="" class="inline-favicon" onerror="this.style.display='none'" />
             <span id="headerGreeting" class="app-name">Only Me Ted</span>
-            <span id="syncDot" class="sync-pill">
-              <span class="dot"></span><span id="syncText">Synced</span>
-            </span>
+            <div id="memberCountBtn" class="sync-pill clickable-pill" role="button" tabindex="0" title="Browse All Accounts">
+              <span class="dot"></span><span id="topMemberCount">1 Member</span>
+            </div>
           </div>
           <div id="vaultStats" class="stats-line">0 items • 0 B stored • ∞ Unlimited</div>
         </div>
       </div>
 
       <div class="top-actions">
+        <div id="chatHubBtn" class="icon-pill badge-host" role="button" tabindex="0" title="Messages & People">
+          <span>💬</span>
+          <span id="unreadTotalBadge" class="unread-badge hidden">0</span>
+        </div>
         <div id="accountBtn" class="icon-pill" role="button" tabindex="0" title="Account & Customization">👤</div>
-        <div id="syncNowBtn" class="icon-pill" role="button" tabindex="0" title="Refresh Vault">↻</div>
-        <div id="logoutBtn" class="icon-pill danger-pill" role="button" tabindex="0" title="Lock & Sign Out">⏻</div>
+        <div id="syncNowBtn" class="icon-pill" role="button" tabindex="0" title="Refresh">↻</div>
+        <div id="logoutBtn" class="icon-pill danger-pill" role="button" tabindex="0" title="Sign Out">⏻</div>
       </div>
     </header>
 
@@ -149,6 +158,10 @@
       </div>
       <div id="quickLinkBtn" class="dock-btn glass-pill" role="button" tabindex="0">
         <span>⛓ Link</span>
+      </div>
+      <div id="dockChatBtn" class="dock-btn glass-pill badge-host" role="button" tabindex="0">
+        <span>💬 Chat</span>
+        <span id="dockUnreadBadge" class="unread-badge hidden">0</span>
       </div>
     </nav>
   </div>
@@ -232,6 +245,7 @@
           <span id="previewMeta" class="preview-sub"></span>
         </div>
         <div class="preview-actions">
+          <div id="previewShareBtn" class="icon-pill" role="button" tabindex="0" title="Send in Direct Message">↗</div>
           <div id="previewPinBtn" class="icon-pill" role="button" tabindex="0" title="Pin to Top">★</div>
           <div id="previewEditBtn" class="icon-pill" role="button" tabindex="0" title="Customize File">✎</div>
           <div id="previewCopyBtn" class="icon-pill" role="button" tabindex="0" title="Copy">⧉</div>
@@ -294,6 +308,82 @@
       </div>
 
       <div id="previewViewport" class="preview-viewport"></div>
+    </div>
+  </div>
+
+  <!-- SOCIAL DIRECT MESSAGES & PEOPLE DIRECTORY MODAL -->
+  <div id="socialModal" class="modal-backdrop hidden">
+    <div class="silk-card modal-card social-card">
+      <!-- HUB VIEW (CHATS + DIRECTORY) -->
+      <div id="socialHubView" class="social-pane">
+        <div class="modal-head">
+          <div>
+            <h3>Messages & Community</h3>
+            <span id="socialMemberSubtitle" class="preview-sub">0 registered vaults</span>
+          </div>
+          <div id="closeSocialBtn" class="icon-pill" role="button" tabindex="0">✕</div>
+        </div>
+
+        <div class="capsule-tabs">
+          <div id="tabSocialChats" class="capsule-tab active" role="button" tabindex="0" data-social-tab="chats">Direct Chats</div>
+          <div id="tabSocialPeople" class="capsule-tab" role="button" tabindex="0" data-social-tab="people">All People</div>
+        </div>
+
+        <div class="search-well compact-search">
+          <span class="search-glyph">⌕</span>
+          <input id="socialSearchInput" type="search" placeholder="Search people by name or @username..." />
+        </div>
+
+        <div id="inboxListPane" class="social-list"></div>
+        <div id="peopleListPane" class="social-list hidden"></div>
+      </div>
+
+      <!-- ACTIVE CONVERSATION THREAD VIEW -->
+      <div id="chatThreadView" class="social-pane thread-pane hidden">
+        <div class="modal-head thread-head">
+          <div class="thread-peer-left">
+            <div id="backToHubBtn" class="icon-pill" role="button" tabindex="0" title="Back">←</div>
+            <div id="threadPeerAvatar" class="avatar-trigger small-avatar">
+              <img id="threadPeerAvatarImg" class="avatar-img hidden" alt="" />
+              <span id="threadPeerInitial">U</span>
+            </div>
+            <div class="preview-title-wrap">
+              <h3 id="threadPeerName">User</h3>
+              <span id="threadPeerSub" class="preview-sub">@username</span>
+            </div>
+          </div>
+          <div id="closeThreadModalBtn" class="icon-pill" role="button" tabindex="0">✕</div>
+        </div>
+
+        <div id="chatMessagesStream" class="chat-stream"></div>
+
+        <!-- REPLY QUOTE BAR -->
+        <div id="replyQuoteBar" class="reply-bar hidden">
+          <div class="reply-bar-text">
+            <strong id="replyQuoteAuthor">Replying</strong>
+            <span id="replyQuoteSnippet"></span>
+          </div>
+          <div id="cancelReplyBtn" class="clear-x" role="button" tabindex="0">✕</div>
+        </div>
+
+        <!-- VAULT FILE PICKER DRAWER INSIDE CHAT -->
+        <div id="chatVaultPicker" class="vault-picker-drawer hidden">
+          <div class="picker-head">
+            <span>Select a file, note, or link from your vault to share</span>
+            <div id="closeVaultPickerBtn" class="clear-x" role="button" tabindex="0">✕</div>
+          </div>
+          <div id="vaultPickerList" class="picker-list"></div>
+        </div>
+
+        <!-- CHAT COMPOSER -->
+        <div class="chat-composer">
+          <div id="attachVaultBtn" class="icon-pill" role="button" tabindex="0" title="Share from My Vault">📁</div>
+          <label for="chatDirectFileInput" class="icon-pill" title="Upload & Send File">＋</label>
+          <input id="chatDirectFileInput" type="file" class="hidden" />
+          <input id="chatMessageInput" type="text" placeholder="Write a message..." autocomplete="off" />
+          <div id="sendChatBtn" class="icon-pill primary-send-pill" role="button" tabindex="0" title="Send">➤</div>
+        </div>
+      </div>
     </div>
   </div>
 
