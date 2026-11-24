@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#090b10" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Only Me Ted" />
+  <meta name="description" content="Only Me Ted — Universal Sharded Cloud Vault" />
+  <title>Only Me Ted</title>
+  <link rel="icon" type="image/png" href="favicon.png" />
+  <link rel="apple-touch-icon" href="favicon.png" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="ambient-bg" aria-hidden="true">
+    <div class="orb orb-1"></div>
+    <div class="orb orb-2"></div>
+    <div class="orb orb-3"></div>
+  </div>
+
+  <!-- AUTH GATE -->
+  <main id="authView" class="viewport-shell auth-shell">
+    <section class="silk-card auth-card">
+      <div class="brand-header">
+        <img src="favicon.png" alt="Only Me Ted" class="brand-logo" onerror="this.style.display='none'" />
+        <div class="brand-badge">SHARDED UNIVERSAL VAULT</div>
+        <h1>Only Me Ted</h1>
+        <p class="muted-sub">Store anything. Instant global access.</p>
+      </div>
+
+      <div class="capsule-tabs" role="tablist">
+        <div id="tabLogin" class="capsule-tab active" role="button" tabindex="0" data-auth-mode="login">Sign In</div>
+        <div id="tabSignup" class="capsule-tab" role="button" tabindex="0" data-auth-mode="signup">Create Vault</div>
+      </div>
+
+      <div class="form-stack">
+        <div class="input-well">
+          <label for="authUsername">Vault Handle</label>
+          <input id="authUsername" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" placeholder="e.g. ted_vault" />
+        </div>
+
+        <div class="input-well">
+          <label for="authPassword">Master Key</label>
+          <input id="authPassword" type="password" autocomplete="current-password" placeholder="••••••••" />
+        </div>
+
+        <div id="confirmWrap" class="input-well hidden">
+          <label for="authConfirm">Confirm Master Key</label>
+          <input id="authConfirm" type="password" autocomplete="new-password" placeholder="••••••••" />
+        </div>
+
+        <div id="authSubmitBtn" class="pill-btn primary-pill" role="button" tabindex="0">
+          <span id="authSubmitLabel">Unlock Vault</span>
+        </div>
+      </div>
+
+      <footer class="micro-footer">© 2026 Sanchar Koirala | All rights reserved</footer>
+    </section>
+  </main>
+
+  <!-- WORKSPACE VIEW -->
+  <div id="appView" class="viewport-shell app-shell hidden">
+    <!-- TOP BAR -->
+    <header class="top-bar">
+      <div class="top-left">
+        <img src="favicon.png" alt="Logo" class="mini-logo" onerror="this.style.display='none'" />
+        <div>
+          <div class="app-title-row">
+            <span class="app-name">Only Me Ted</span>
+            <span id="syncDot" class="sync-pill" title="Cloud Studio RTDB Connected">
+              <span class="dot"></span><span id="syncText">Live</span>
+            </span>
+          </div>
+          <div id="vaultStats" class="stats-line">0 items • 0 B stored</div>
+        </div>
+      </div>
+
+      <div class="top-actions">
+        <div id="syncNowBtn" class="icon-pill" role="button" tabindex="0" title="Sync Now">↻</div>
+        <div id="exportVaultBtn" class="icon-pill" role="button" tabindex="0" title="Export Backup">↓</div>
+        <div id="logoutBtn" class="icon-pill danger-pill" role="button" tabindex="0" title="Lock & Sign Out">⏻</div>
+      </div>
+    </header>
+
+    <!-- SEARCH & FILTER RIBBON -->
+    <section class="control-ribbon">
+      <div class="search-well">
+        <span class="search-glyph">⌕</span>
+        <input id="searchInput" type="search" placeholder="Search files, notes, links, tags... (or press Ctrl+V to paste)" />
+        <div id="clearSearchBtn" class="clear-x hidden" role="button" tabindex="0">✕</div>
+      </div>
+
+      <div class="filter-scroller" id="filterBar">
+        <div class="filter-chip active" role="button" tabindex="0" data-filter="all">All</div>
+        <div class="filter-chip" role="button" tabindex="0" data-filter="pinned">Pinned</div>
+        <div class="filter-chip" role="button" tabindex="0" data-filter="file">Files</div>
+        <div class="filter-chip" role="button" tabindex="0" data-filter="media">Media</div>
+        <div class="filter-chip" role="button" tabindex="0" data-filter="note">Notes</div>
+        <div class="filter-chip" role="button" tabindex="0" data-filter="link">Links</div>
+        <div class="filter-chip" role="button" tabindex="0" data-filter="locked">Encrypted</div>
+      </div>
+    </section>
+
+    <!-- QUICK DROPZONE + VAULT GRID -->
+    <main id="dropZone" class="vault-stage">
+      <div id="dropOverlay" class="drop-overlay hidden">
+        <div class="drop-box">
+          <div class="drop-icon">⇧</div>
+          <div class="drop-title">Release to Shard & Store</div>
+          <div class="drop-sub">Unlimited size • GZIP compressed • Global RTDB sync</div>
+        </div>
+      </div>
+
+      <!-- UPLOAD PROGRESS BANNER -->
+      <div id="transferBanner" class="transfer-banner hidden">
+        <div class="transfer-head">
+          <span id="transferTitle">Sharding payload...</span>
+          <span id="transferPct">0%</span>
+        </div>
+        <div class="progress-track">
+          <div id="transferFill" class="progress-fill"></div>
+        </div>
+      </div>
+
+      <div id="emptyState" class="empty-state hidden">
+        <div class="empty-orb">✦</div>
+        <h2>Your Vault is Ready</h2>
+        <p>Drop any file, paste from clipboard, or tap <strong>+ Store</strong> below.</p>
+      </div>
+
+      <div id="vaultGrid" class="vault-grid"></div>
+
+      <footer class="workspace-footer">© 2026 Sanchar Koirala | All rights reserved</footer>
+    </main>
+
+    <!-- FLOATING ACTION DOCK -->
+    <nav class="action-dock">
+      <div id="openUploadBtn" class="dock-btn primary-pill" role="button" tabindex="0">
+        <span>＋ Store Anything</span>
+      </div>
+      <div id="quickNoteBtn" class="dock-btn glass-pill" role="button" tabindex="0">
+        <span>✎ Note</span>
+      </div>
+      <div id="quickLinkBtn" class="dock-btn glass-pill" role="button" tabindex="0">
+        <span>⛓ Link</span>
+      </div>
+    </nav>
+  </div>
+
+  <!-- CREATE / STORE MODAL -->
+  <div id="createModal" class="modal-backdrop hidden">
+    <div class="silk-card modal-card">
+      <div class="modal-head">
+        <h3>Store in Vault</h3>
+        <div id="closeCreateBtn" class="icon-pill" role="button" tabindex="0">✕</div>
+      </div>
+
+      <div class="capsule-tabs">
+        <div class="capsule-tab active" role="button" tabindex="0" data-create-tab="files">Any File</div>
+        <div class="capsule-tab" role="button" tabindex="0" data-create-tab="note">Note / Code</div>
+        <div class="capsule-tab" role="button" tabindex="0" data-create-tab="link">Web Link</div>
+      </div>
+
+      <!-- TAB: FILES -->
+      <div id="paneFiles" class="create-pane">
+        <label for="filePicker" class="file-drop-well">
+          <div class="file-drop-glyph">⇪</div>
+          <div id="filePickerLabel" class="file-drop-title">Tap to pick files or drop anywhere</div>
+          <div class="file-drop-hint">Photos, videos, PDFs, ZIPs, APKs, docs — automatically sharded</div>
+        </label>
+        <input id="filePicker" type="file" multiple class="hidden" />
+      </div>
+
+      <!-- TAB: NOTE -->
+      <div id="paneNote" class="create-pane hidden">
+        <div class="input-well">
+          <label for="noteTitle">Title</label>
+          <input id="noteTitle" type="text" placeholder="Snippet, idea, or secret key..." />
+        </div>
+        <div class="input-well">
+          <label for="noteBody">Content</label>
+          <textarea id="noteBody" rows="5" placeholder="Write or paste anything..."></textarea>
+        </div>
+        <div class="encrypt-row">
+          <div id="encryptToggle" class="toggle-pill" role="button" tabindex="0" data-active="false">
+            <span class="toggle-dot"></span>
+            <span>AES-256 Zero-Knowledge Lock</span>
+          </div>
+        </div>
+        <div id="encryptPassWrap" class="input-well hidden">
+          <label for="encryptPass">Encryption Passphrase</label>
+          <input id="encryptPass" type="password" placeholder="Required to decrypt later" />
+        </div>
+        <div id="saveNoteBtn" class="pill-btn primary-pill" role="button" tabindex="0">Save Note to Cloud</div>
+      </div>
+
+      <!-- TAB: LINK -->
+      <div id="paneLink" class="create-pane hidden">
+        <div class="input-well">
+          <label for="linkUrl">URL</label>
+          <input id="linkUrl" type="url" placeholder="https://..." />
+        </div>
+        <div class="input-well">
+          <label for="linkTitle">Label (optional)</label>
+          <input id="linkTitle" type="text" placeholder="Custom bookmark name" />
+        </div>
+        <div id="saveLinkBtn" class="pill-btn primary-pill" role="button" tabindex="0">Save Link to Cloud</div>
+      </div>
+
+      <div class="input-well tag-input-row">
+        <label for="itemTags">Tags (comma separated)</label>
+        <input id="itemTags" type="text" placeholder="work, personal, media" />
+      </div>
+    </div>
+  </div>
+
+  <!-- UNIVERSAL PREVIEW / INSPECTOR MODAL -->
+  <div id="previewModal" class="modal-backdrop hidden">
+    <div class="silk-card modal-card preview-card">
+      <div class="modal-head">
+        <div class="preview-title-wrap">
+          <h3 id="previewTitle">Item</h3>
+          <span id="previewMeta" class="preview-sub"></span>
+        </div>
+        <div class="preview-actions">
+          <div id="previewPinBtn" class="icon-pill" role="button" tabindex="0" title="Pin">★</div>
+          <div id="previewCopyBtn" class="icon-pill" role="button" tabindex="0" title="Copy">⧉</div>
+          <div id="previewDownloadBtn" class="icon-pill" role="button" tabindex="0" title="Download">↓</div>
+          <div id="previewDeleteBtn" class="icon-pill danger-pill" role="button" tabindex="0" title="Delete">⌫</div>
+          <div id="closePreviewBtn" class="icon-pill" role="button" tabindex="0">✕</div>
+        </div>
+      </div>
+
+      <div id="decryptPrompt" class="decrypt-box hidden">
+        <div class="lock-emblem">🔒</div>
+        <p>This entry is encrypted with AES-GCM 256.</p>
+        <div class="input-well">
+          <input id="decryptInput" type="password" placeholder="Enter decryption passphrase" />
+        </div>
+        <div id="unlockItemBtn" class="pill-btn primary-pill" role="button" tabindex="0">Decrypt Content</div>
+      </div>
+
+      <div id="previewViewport" class="preview-viewport"></div>
+    </div>
+  </div>
+
+  <!-- CUSTOM TOAST CONTAINER -->
+  <div id="toastStack" class="toast-stack" aria-live="polite"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
